@@ -174,6 +174,82 @@ class TestCLIReplay:
         assert result.exit_code != 0
         assert "Missing option" in result.output or "required" in result.output.lower()
 
+    @patch("pondereplay.cli.TransactionReplayer")
+    def test_replay_verbose_prints_auto_strict_hint(self, mock_replayer_class, tmp_path):
+        runner = CliRunner()
+        hex_file = tmp_path / "test.hex"
+        hex_file.write_text("0x6080604052")
+
+        mock_replayer = Mock()
+        mock_result = ReplayResult(
+            success=False,
+            tx_hash="0x1234",
+            block_number=12345,
+            error="execution reverted: time",
+            diagnostics={
+                "faithfulness": "faithful",
+                "auto_strict_escalated": True,
+                "status_mismatch": True,
+            },
+            replay_mode="anvil_indexed_strict_auto_strict",
+        )
+        mock_replayer.replay_transaction.return_value = mock_result
+        mock_replayer_class.return_value = mock_replayer
+
+        result = runner.invoke(
+            cli,
+            [
+                "replay",
+                "--rpc-url",
+                "http://localhost:8545",
+                "--tx-hash",
+                "0x1234",
+                "--contract-address",
+                "0xabcd",
+                "--bytecode-file",
+                str(hex_file),
+                "-v",
+            ],
+        )
+
+        assert result.exit_code == 1
+        assert "auto-escalated to strict Anvil context" in result.output
+        assert "status mismatch detected" in result.output
+
+    @patch("pondereplay.cli.TransactionReplayer")
+    def test_replay_passes_strict_flags(self, mock_replayer_class, tmp_path):
+        runner = CliRunner()
+        hex_file = tmp_path / "test.hex"
+        hex_file.write_text("0x6080604052")
+
+        mock_replayer = Mock()
+        mock_replayer.replay_transaction.return_value = ReplayResult(
+            success=True, tx_hash="0x1234", block_number=12345
+        )
+        mock_replayer_class.return_value = mock_replayer
+
+        result = runner.invoke(
+            cli,
+            [
+                "replay",
+                "--rpc-url",
+                "http://localhost:8545",
+                "--tx-hash",
+                "0x1234",
+                "--contract-address",
+                "0xabcd",
+                "--bytecode-file",
+                str(hex_file),
+                "--strict-anvil",
+                "--no-auto-strict-on-mismatch",
+            ],
+        )
+
+        assert result.exit_code == 0
+        kwargs = mock_replayer_class.call_args.kwargs
+        assert kwargs["strict_anvil_context"] is True
+        assert kwargs["auto_strict_on_mismatch"] is False
+
 
 class TestCLISanityCheck:
     """Test CLI sanity-check command"""
@@ -306,7 +382,8 @@ class TestCLITextOutput:
         )
 
         assert result.exit_code == 0
-        assert "Success: True" in result.output
+        assert "Local replay: SUCCESS" in result.output
+        assert "Faithful to chain: True" in result.output
         assert "Block Number: 12345" in result.output
         assert "Gas Used: 50000" in result.output
 

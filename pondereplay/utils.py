@@ -3,7 +3,14 @@ Shared utilities for PonDeReplay.
 """
 
 import json
+import sys
 from pathlib import Path
+
+
+def verbose_log(message: str, *, enabled: bool = True) -> None:
+    """Write progress messages to stderr so stdout stays clean for JSON."""
+    if enabled:
+        print(message, file=sys.stderr)
 
 
 def read_bytecode(bytecode_file: str) -> str:

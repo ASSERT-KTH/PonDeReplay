@@ -10,11 +10,25 @@ from .replayer import TransactionReplayer, ReplayResult
 class BatchReplayer:
     """Replay multiple transactions and generate comparison reports"""
 
-    def __init__(self, rpc_url: str):
+    def __init__(
+        self,
+        rpc_url: str,
+        *,
+        strict_anvil_context: bool = False,
+        auto_strict_on_mismatch: bool = True,
+        prefer_anvil_when_escalated: bool = False,
+        bump_gas_for_patch: bool = False,
+    ):
         self.w3 = Web3(Web3.HTTPProvider(rpc_url))
         if not self.w3.is_connected():
             raise ConnectionError(f"Cannot connect to RPC: {rpc_url}")
-        self.replayer = TransactionReplayer(rpc_url)
+        self.replayer = TransactionReplayer(
+            rpc_url,
+            strict_anvil_context=strict_anvil_context,
+            auto_strict_on_mismatch=auto_strict_on_mismatch,
+            prefer_anvil_when_escalated=prefer_anvil_when_escalated,
+            bump_gas_for_patch=bump_gas_for_patch,
+        )
 
     def get_transactions_to_address(
         self,
@@ -151,9 +165,14 @@ class BatchReplayer:
 
         attack_tx_lower = attack_tx.lower() if attack_tx else None
 
+        unfaithful = []
+
         for tx_hash, result in results.items():
             tx_lower = tx_hash.lower()
             is_attack = attack_tx_lower and tx_lower == attack_tx_lower
+            faith = (result.diagnostics or {}).get("faithfulness")
+            if faith == "unfaithful":
+                unfaithful.append(tx_hash)
 
             if result.success:
                 passed.append(tx_hash)
@@ -173,8 +192,9 @@ class BatchReplayer:
             "failed": len(failed),
             "passed_txs": passed,
             "failed_txs": failed,
+            "unfaithful_replay_txs": unfaithful,
             "attack_tx_failed_as_expected": attack_expected_fail,
-            "results": results,
+            "results": {k: v.to_dict() for k, v in results.items()},
         }
 
 
@@ -198,15 +218,25 @@ def print_batch_report(report: Dict[str, Any], attack_tx: str = None):
         print(f"Attack Tx Status: {status}")
         print()
 
+    if report.get("unfaithful_replay_txs"):
+        print(
+            f"Unfaithful replays ({len(report['unfaithful_replay_txs'])}): "
+            "same-block setup may invalidate fast replay"
+        )
+        for tx in report["unfaithful_replay_txs"][:10]:
+            print(f"  {tx}")
+        print()
+
     if report["failed_txs"]:
         print(f"Failed Transactions ({len(report['failed_txs'])}):")
         for tx in report["failed_txs"]:
-            result = report["results"][tx]
+            raw = report["results"][tx]
+            err = raw.get("error") if isinstance(raw, dict) else getattr(raw, "error", None)
             is_attack = attack_tx and tx.lower() == attack_tx.lower()
             marker = " [ATTACK]" if is_attack else ""
             print(f"  {tx}{marker}")
-            if result.error:
-                print(f"    Error: {result.error}")
+            if err:
+                print(f"    Error: {err}")
         print()
 
     if report["passed_txs"]:
