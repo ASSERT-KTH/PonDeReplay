@@ -9,7 +9,6 @@ from typing import Any, Dict, List, Optional, Set
 
 from web3 import Web3
 
-
 KNOWN_SELECTORS = {
     "f2b9fdb8": "supply(address,uint256)",
     "4b8a3529": "borrow(address,uint256)",
