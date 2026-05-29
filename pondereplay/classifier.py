@@ -40,7 +40,11 @@ def classify_patch_effect(
     if is_attack_tx:
         if chain_tx_succeeded and not original_replay.success:
             return "inconclusive"
-        if chain_tx_succeeded and original_replay.success and not patched_replay.success:
+        if (
+            chain_tx_succeeded
+            and original_replay.success
+            and not patched_replay.success
+        ):
             patch_diag = patched_replay.diagnostics or {}
             if patch_diag.get("local_failure_reason") == "out_of_gas":
                 return "inconclusive"

@@ -74,9 +74,7 @@ def _classify_attack_patch(
         replayer = TransactionReplayer(rpc_url)
         patched_bytecode = read_bytecode(str(patch_hex))
         original_path = _resolve_original_hex(patch_hex)
-        original_bytecode = (
-            read_bytecode(str(original_path)) if original_path else None
-        )
+        original_bytecode = read_bytecode(str(original_path)) if original_path else None
         _, _, report = replayer.replay_original_and_patched(
             tx_hash=malicious_tx,
             contract_address=contract_address,
@@ -382,7 +380,9 @@ def _sample_for_contract(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run DFHL experiment with PonDeReplay.")
+    parser = argparse.ArgumentParser(
+        description="Run DFHL experiment with PonDeReplay."
+    )
     parser.add_argument(
         "--dataset-info",
         default=str(DEFAULT_DATASET_INFO),

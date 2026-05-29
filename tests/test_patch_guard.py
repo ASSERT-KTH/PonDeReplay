@@ -42,9 +42,7 @@ class TestPatchGuardIntegration:
         tx = w3.eth.get_transaction(
             "0x0d51836604cfc7b147e4d5eddf0570fedb301dface9055bb7981684b03c1d84a"
         )
-        info = analyze_patch_guard(
-            w3, tx, fork_block=tx["blockNumber"] - 1
-        )
+        info = analyze_patch_guard(w3, tx, fork_block=tx["blockNumber"] - 1)
         assert info["patch_guard_applies"] is True
         assert info["patch_guard_would_block"] is False
         assert info["patch_guard_liquidity"] < 0

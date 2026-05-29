@@ -319,6 +319,7 @@ def find_revert_in_call_trace(
 
     if isinstance(trace_root, dict):
         walk(trace_root, 0)
+
         # Frames with Error(string) output even if callTracer omits error on child
         def walk_abi_strings(node: Dict[str, Any], depth: int) -> None:
             output = node.get("output") or ""

@@ -88,9 +88,7 @@ def _find_free_port(host: str, start: int, end: int) -> int:
             except OSError:
                 continue
             return port
-    raise RuntimeError(
-        f"No free port available in range [{start}, {end}) on {host}"
-    )
+    raise RuntimeError(f"No free port available in range [{start}, {end}) on {host}")
 
 
 def normalize_block_timestamp(timestamp: int) -> int:
@@ -249,7 +247,9 @@ class AnvilIndexedReplayer:
             return True
         return False
 
-    def _set_block_context(self, source_block: dict, strict: bool = False) -> Dict[str, Any]:
+    def _set_block_context(
+        self, source_block: dict, strict: bool = False
+    ) -> Dict[str, Any]:
         """Best-effort alignment of timestamp/baseFee/coinbase with source block."""
         out: Dict[str, Any] = {
             "timestamp_applied": False,
@@ -344,14 +344,18 @@ class AnvilIndexedReplayer:
     def _tx_params_from_source_tx(self, tx: dict) -> Dict[str, Any]:
         params: Dict[str, Any] = {
             "from": Web3.to_checksum_address(tx["from"]),
-            "to": (Web3.to_checksum_address(tx["to"]) if tx.get("to") is not None else None),
+            "to": (
+                Web3.to_checksum_address(tx["to"]) if tx.get("to") is not None else None
+            ),
             "value": _to_rpc_hex(tx.get("value", 0)),
             "data": _to_rpc_hex(tx.get("input") or "0x"),
             "gas": _to_rpc_hex(tx.get("gas")),
         }
         if tx.get("maxFeePerGas") is not None:
             params["maxFeePerGas"] = _to_rpc_hex(tx["maxFeePerGas"])
-            params["maxPriorityFeePerGas"] = _to_rpc_hex(tx.get("maxPriorityFeePerGas", 0))
+            params["maxPriorityFeePerGas"] = _to_rpc_hex(
+                tx.get("maxPriorityFeePerGas", 0)
+            )
         elif tx.get("gasPrice") is not None:
             params["gasPrice"] = _to_rpc_hex(tx["gasPrice"])
         return params
@@ -371,7 +375,9 @@ class AnvilIndexedReplayer:
         Replay prior txs then target with automine on, forcing the same block timestamp
         before each mine so time-dependent checks see the source block time.
         """
-        source_timestamp = normalize_block_timestamp(int(source_block.get("timestamp", 0)))
+        source_timestamp = normalize_block_timestamp(
+            int(source_block.get("timestamp", 0))
+        )
         ctx_flags = self._set_block_context(source_block, strict=strict_context)
         ctx_flags["replay_strategy"] = "sequential_same_timestamp"
         ctx_flags["automine_enabled"] = self._set_automine(True)
@@ -445,20 +451,24 @@ class AnvilIndexedReplayer:
         contract_address = Web3.to_checksum_address(contract_address)
         bytecode = _normalize_bytecode(bytecode)
         source_block = w3_source.eth.get_block(block_number)
-        source_timestamp = normalize_block_timestamp(int(source_block.get("timestamp", 0)))
+        source_timestamp = normalize_block_timestamp(
+            int(source_block.get("timestamp", 0))
+        )
 
         self.start(fork_block=block_number - 1)
         try:
             timestamp_source = "source_block"
-            target_local_hash, local, ctx_flags = self._replay_sequential_same_timestamp(
-                w3_source,
-                tx,
-                prior_tx_hashes,
-                contract_address,
-                bytecode,
-                source_block,
-                strict_context,
-                verbose,
+            target_local_hash, local, ctx_flags = (
+                self._replay_sequential_same_timestamp(
+                    w3_source,
+                    tx,
+                    prior_tx_hashes,
+                    contract_address,
+                    bytecode,
+                    source_block,
+                    strict_context,
+                    verbose,
+                )
             )
             if not ctx_flags.get("timestamp_applied", False):
                 timestamp_source = "anvil_default"
@@ -466,7 +476,9 @@ class AnvilIndexedReplayer:
             mined = local.eth.get_transaction_receipt(target_local_hash)
             mined_block_number = int(mined["blockNumber"])
             local_block = local.eth.get_block(mined_block_number)
-            local_timestamp = normalize_block_timestamp(int(local_block.get("timestamp", 0)))
+            local_timestamp = normalize_block_timestamp(
+                int(local_block.get("timestamp", 0))
+            )
 
             block_tx_count = len(local_block.get("transactions", []))
             source_tx_index = int(tx.get("transactionIndex", 0))
@@ -491,7 +503,9 @@ class AnvilIndexedReplayer:
             tx_params = self._tx_params_from_source_tx(tx)
             revert_reason = None
             diag: Dict[str, Any] = {
-                "faithfulness": "faithful" if not context_unfaithful else "context_unfaithful",
+                "faithfulness": (
+                    "faithful" if not context_unfaithful else "context_unfaithful"
+                ),
                 "prior_tx_count": len(prior_tx_hashes),
                 "onchain_status": onchain_status,
                 "local_status": local_status,
@@ -509,8 +523,12 @@ class AnvilIndexedReplayer:
                 "replay_strategy": ctx_flags.get(
                     "replay_strategy", "sequential_same_timestamp"
                 ),
-                "basefee_context_applied": bool(ctx_flags.get("basefee_applied", False)),
-                "coinbase_context_applied": bool(ctx_flags.get("coinbase_applied", False)),
+                "basefee_context_applied": bool(
+                    ctx_flags.get("basefee_applied", False)
+                ),
+                "coinbase_context_applied": bool(
+                    ctx_flags.get("coinbase_applied", False)
+                ),
                 "automine_enabled": bool(ctx_flags.get("automine_enabled", False)),
                 "timestamp_applied": bool(ctx_flags.get("timestamp_applied", False)),
                 "timestamp_error": ctx_flags.get("timestamp_error"),
@@ -559,9 +577,7 @@ class AnvilIndexedReplayer:
                     except Exception:
                         pass
                 else:
-                    revert_reason = (
-                        f"status mismatch: on-chain={onchain_status}, local={local_status}"
-                    )
+                    revert_reason = f"status mismatch: on-chain={onchain_status}, local={local_status}"
             elif context_unfaithful:
                 if time_context_mismatch:
                     revert_reason = (
@@ -576,7 +592,9 @@ class AnvilIndexedReplayer:
 
             return ReplayResult(
                 success=success,
-                tx_hash=tx["hash"].hex() if hasattr(tx["hash"], "hex") else str(tx["hash"]),
+                tx_hash=(
+                    tx["hash"].hex() if hasattr(tx["hash"], "hex") else str(tx["hash"])
+                ),
                 block_number=block_number,
                 gas_used=mined.get("gasUsed", receipt.get("gasUsed")),
                 replay_mode="anvil_indexed",
@@ -586,7 +604,9 @@ class AnvilIndexedReplayer:
         except Exception as e:
             return ReplayResult(
                 success=False,
-                tx_hash=tx["hash"].hex() if hasattr(tx["hash"], "hex") else str(tx["hash"]),
+                tx_hash=(
+                    tx["hash"].hex() if hasattr(tx["hash"], "hex") else str(tx["hash"])
+                ),
                 block_number=block_number,
                 error=str(e),
                 replay_mode="anvil_indexed",

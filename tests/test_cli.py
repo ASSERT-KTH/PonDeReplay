@@ -175,7 +175,9 @@ class TestCLIReplay:
         assert "Missing option" in result.output or "required" in result.output.lower()
 
     @patch("pondereplay.cli.TransactionReplayer")
-    def test_replay_verbose_prints_auto_strict_hint(self, mock_replayer_class, tmp_path):
+    def test_replay_verbose_prints_auto_strict_hint(
+        self, mock_replayer_class, tmp_path
+    ):
         runner = CliRunner()
         hex_file = tmp_path / "test.hex"
         hex_file.write_text("0x6080604052")

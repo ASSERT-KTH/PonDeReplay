@@ -25,6 +25,8 @@ def test_benign_oog_is_inconclusive_not_effective_patch():
         replay_mode="anvil_indexed_strict",
     )
     assert (
-        classify_patch_effect(original, patched, chain_tx_succeeded=True, is_attack_tx=False)
+        classify_patch_effect(
+            original, patched, chain_tx_succeeded=True, is_attack_tx=False
+        )
         == "inconclusive"
     )

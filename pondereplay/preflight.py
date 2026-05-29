@@ -52,7 +52,9 @@ def _code_len(w3: Web3, address: Optional[str], block: int) -> int:
     if not address:
         return 0
     try:
-        code = w3.eth.get_code(Web3.to_checksum_address(address), block_identifier=block)
+        code = w3.eth.get_code(
+            Web3.to_checksum_address(address), block_identifier=block
+        )
         return len(code)
     except Exception:
         return 0
@@ -103,7 +105,9 @@ def run_preflight(
     tx_to_prev = _code_len(w3, tx_to, prev_block)
     tx_to_at = _code_len(w3, tx_to, block_number)
     patched_prev = _code_len(w3, patched_address, prev_block)
-    onchain_status = int(receipt.get("status", 0)) if receipt.get("status") is not None else None
+    onchain_status = (
+        int(receipt.get("status", 0)) if receipt.get("status") is not None else None
+    )
     prev_ts: Optional[int] = None
     block_ts: Optional[int] = None
     ts_delta: Optional[int] = None

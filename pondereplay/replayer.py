@@ -187,9 +187,7 @@ class TransactionReplayer:
         if using_patched_bytecode:
             from .patch_guard import analyze_patch_guard
 
-            patch_guard = analyze_patch_guard(
-                self.w3, tx, fork_block=block_number - 1
-            )
+            patch_guard = analyze_patch_guard(self.w3, tx, fork_block=block_number - 1)
             if verbose and patch_guard.get("patch_guard_applies"):
                 verbose_log(f"[*] {patch_guard.get('patch_guard_note')}")
 
@@ -288,9 +286,7 @@ class TransactionReplayer:
         self._merge_patch_guard(result, patch_guard)
         return self._finalize_result(result, receipt)
 
-    def _finalize_result(
-        self, result: ReplayResult, receipt: dict
-    ) -> ReplayResult:
+    def _finalize_result(self, result: ReplayResult, receipt: dict) -> ReplayResult:
         from .execution_outcome import apply_execution_outcome
 
         diag = result.diagnostics or {}
@@ -493,11 +489,11 @@ class TransactionReplayer:
             self.w3, diagnostics.block_number, diagnostics.transaction_index
         )
         if verbose:
-            verbose_log(f"[*] Anvil indexed replay ({len(prior)} prior txs in block)...")
+            verbose_log(
+                f"[*] Anvil indexed replay ({len(prior)} prior txs in block)..."
+            )
 
-        effective_bump = (
-            self.bump_gas_for_patch if bump_gas is None else bump_gas
-        )
+        effective_bump = self.bump_gas_for_patch if bump_gas is None else bump_gas
         with AnvilIndexedReplayer(
             self.fork_url,
             anvil_bin=self.anvil_bin,
@@ -530,13 +526,18 @@ class TransactionReplayer:
             return False
         if result.success:
             return False
-        if result.replay_mode.startswith("anvil_indexed") and "strict" in result.replay_mode:
+        if (
+            result.replay_mode.startswith("anvil_indexed")
+            and "strict" in result.replay_mode
+        ):
             return False
         chain_ok = int(receipt.get("status", 0)) == 1
         if chain_ok:
             return True
         err = (result.error or "").lower()
-        return any(k in err for k in ("execution reverted: time", "timestamp", "deadline"))
+        return any(
+            k in err for k in ("execution reverted: time", "timestamp", "deadline")
+        )
 
     def _replay_with_web3(
         self,

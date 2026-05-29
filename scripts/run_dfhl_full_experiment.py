@@ -89,11 +89,7 @@ def _write_json(path: Path, payload: Any) -> None:
 
 
 def _is_tx_hash(value: Any) -> bool:
-    return (
-        isinstance(value, str)
-        and value.startswith("0x")
-        and len(value) == 66
-    )
+    return isinstance(value, str) and value.startswith("0x") and len(value) == 66
 
 
 def _eligible_cases(
@@ -138,9 +134,7 @@ def _eligible_cases(
                 "case_dir": case_dir,
                 "contract_address": contract_addr,
                 "proxy_address": proxy_addr,
-                "malicious_tx": (
-                    malicious_tx if _is_tx_hash(malicious_tx) else None
-                ),
+                "malicious_tx": (malicious_tx if _is_tx_hash(malicious_tx) else None),
                 "original_hex": orig_hex,
                 "patch_hex": patch_hex,
                 "tx_records": tx_records,
@@ -329,7 +323,9 @@ def _local_reverted(result: Dict[str, Any]) -> Optional[bool]:
     """
     if not isinstance(result, dict):
         return None
-    execution = result.get("execution") if isinstance(result.get("execution"), dict) else {}
+    execution = (
+        result.get("execution") if isinstance(result.get("execution"), dict) else {}
+    )
     local_reverted = result.get("local_reverted")
     if isinstance(local_reverted, bool):
         return local_reverted
@@ -384,7 +380,8 @@ def _has_time_risk_warning(result: Dict[str, Any]) -> bool:
     if not isinstance(warnings, list):
         return False
     return any(
-        isinstance(w, str) and ("time/context mismatch" in w.lower() or "time-dependent" in w.lower())
+        isinstance(w, str)
+        and ("time/context mismatch" in w.lower() or "time-dependent" in w.lower())
         for w in warnings
     )
 
@@ -434,14 +431,11 @@ def _on_original_sanity(
         }
 
     if bool(orig_local_reverted) == bool(chain_reverted):
-        details = (
-            "original replay reproduced the on-chain "
-            + ("revert" if chain_reverted else "success")
+        details = "original replay reproduced the on-chain " + (
+            "revert" if chain_reverted else "success"
         )
         if _has_time_risk_warning(orig_result):
-            details += (
-                " (preflight notes time/context mismatch risk — advisory only)"
-            )
+            details += " (preflight notes time/context mismatch risk — advisory only)"
         return {
             "ok": True,
             "reason": "matches_chain",
@@ -876,8 +870,7 @@ def _write_summary_md(summary: Dict[str, Any], path: Path) -> None:
     lines.append("")
 
     on_original_fail_cases = [
-        c for c in summary["cases"]
-        if (c.get("on_original") or {}).get("failed", 0) > 0
+        c for c in summary["cases"] if (c.get("on_original") or {}).get("failed", 0) > 0
     ]
     if on_original_fail_cases:
         lines.append("## on_original failures (replay ≠ chain on original bytecode)\n")
@@ -897,9 +890,7 @@ def _write_summary_md(summary: Dict[str, Any], path: Path) -> None:
                 )
             lines.append("")
 
-    suspicious_cases = [
-        c for c in summary["cases"] if c.get("suspicious_txs")
-    ]
+    suspicious_cases = [c for c in summary["cases"] if c.get("suspicious_txs")]
     if suspicious_cases:
         lines.append("## Patch breaks benign (on_original ok)\n")
         for case in suspicious_cases:
@@ -907,9 +898,7 @@ def _write_summary_md(summary: Dict[str, Any], path: Path) -> None:
             for tx in case["suspicious_txs"]:
                 msg = tx.get("patch_revert_message") or "(no revert message)"
                 sig = tx.get("canonical_sig") or tx.get("selector") or ""
-                lines.append(
-                    f"- `{tx['tx_hash']}` `{sig}` — patch revert: {msg}"
-                )
+                lines.append(f"- `{tx['tx_hash']}` `{sig}` — patch revert: {msg}")
             lines.append("")
 
     for case in summary["cases"]:
@@ -1045,8 +1034,7 @@ def main() -> int:
         return 1
 
     print(
-        f"Eligible cases ({len(cases)}): "
-        + ", ".join(c["id"] for c in cases),
+        f"Eligible cases ({len(cases)}): " + ", ".join(c["id"] for c in cases),
         file=sys.stderr,
     )
 
@@ -1120,9 +1108,7 @@ def main() -> int:
                         if isinstance(h, str):
                             replayed_keys.add(h.lower())
             if replayed_keys:
-                tx_records = {
-                    k: v for k, v in tx_records.items() if k in replayed_keys
-                }
+                tx_records = {k: v for k, v in tx_records.items() if k in replayed_keys}
                 case["tx_records"] = tx_records
 
         if args.limit_tx is not None and len(tx_records) > args.limit_tx:
@@ -1184,8 +1170,7 @@ def main() -> int:
                 try:
                     report = _load_json(existing)
                     if isinstance(report, dict) and (
-                        args.reclassify_only
-                        or report.get("total") == len(tx_hashes)
+                        args.reclassify_only or report.get("total") == len(tx_hashes)
                     ):
                         if args.verbose:
                             print(
@@ -1270,11 +1255,7 @@ def main() -> int:
 
         summary["cases"].append(
             {
-                **{
-                    k: v
-                    for k, v in analysis.items()
-                    if k != "tx_results"
-                },
+                **{k: v for k, v in analysis.items() if k != "tx_results"},
                 "tx_results_path": str(case_out / "soundness.json"),
             }
         )

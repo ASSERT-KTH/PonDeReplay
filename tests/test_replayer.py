@@ -137,7 +137,9 @@ class TestTransactionReplayer:
 
         mock_web3.return_value = mock_w3_instance
 
-        replayer = TransactionReplayer("http://localhost:8545", use_trace_for_gate=False)
+        replayer = TransactionReplayer(
+            "http://localhost:8545", use_trace_for_gate=False
+        )
         result = replayer.replay_transaction(
             tx_hash="0x1234",
             contract_address="0x85A948Fd70B2b415bdA93324581fb5FfF1293DF7",
@@ -287,7 +289,9 @@ class TestTransactionReplayer:
 
         mock_web3.return_value = mock_w3_instance
 
-        replayer = TransactionReplayer("http://localhost:8545", use_trace_for_gate=False)
+        replayer = TransactionReplayer(
+            "http://localhost:8545", use_trace_for_gate=False
+        )
         result, matches = replayer.sanity_check(
             tx_hash="0x1234",
             contract_address="0x85A948Fd70B2b415bdA93324581fb5FfF1293DF7",

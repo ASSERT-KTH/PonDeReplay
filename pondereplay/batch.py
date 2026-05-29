@@ -231,7 +231,11 @@ def print_batch_report(report: Dict[str, Any], attack_tx: str = None):
         print(f"Failed Transactions ({len(report['failed_txs'])}):")
         for tx in report["failed_txs"]:
             raw = report["results"][tx]
-            err = raw.get("error") if isinstance(raw, dict) else getattr(raw, "error", None)
+            err = (
+                raw.get("error")
+                if isinstance(raw, dict)
+                else getattr(raw, "error", None)
+            )
             is_attack = attack_tx and tx.lower() == attack_tx.lower()
             marker = " [ATTACK]" if is_attack else ""
             print(f"  {tx}{marker}")

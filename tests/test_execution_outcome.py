@@ -46,7 +46,10 @@ class TestExecutionOutcome:
             block_number=1,
             error="execution reverted: foo",
             replay_mode="eth_call",
-            diagnostics={"onchain_status": 1, "revert_message": "execution reverted: foo"},
+            diagnostics={
+                "onchain_status": 1,
+                "revert_message": "execution reverted: foo",
+            },
         )
         ex = build_execution_outcome(result)
         assert ex["local_reverted"] is True

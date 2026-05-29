@@ -37,9 +37,7 @@ def build_execution_outcome(result: "ReplayResult") -> Dict[str, Any]:
     local_revert_message = None
     if local_reverted:
         local_revert_message = (
-            diag.get("revert_message")
-            or result.error
-            or "execution reverted"
+            diag.get("revert_message") or result.error or "execution reverted"
         )
 
     status_matches = None

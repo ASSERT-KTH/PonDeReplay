@@ -179,7 +179,9 @@ def analyze_transaction_trace(
     )
 
     # Also consider delegatecall targets: proxy may call implementation
-    impl_calls = [c for c in calls if c.to_address and c.to_address.lower() == patched_lower]
+    impl_calls = [
+        c for c in calls if c.to_address and c.to_address.lower() == patched_lower
+    ]
 
     return TraceAnalysis(
         tx_hash=tx_hash,
