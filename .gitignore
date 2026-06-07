@@ -34,3 +34,7 @@ pip-wheel-metadata/
 
 # Repo-local misc artifacts
 cursor-sandbox-apparmor.deb
+experiment_runs/
+/recap.md
+txs.json
+0xf10bc5be84640236c71173d1809038af4ee19002.json

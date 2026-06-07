@@ -1,0 +1,22 @@
+diff --git a/src/BEC_exp/BecToken.sol b/src/BEC_exp/BecToken_patch.sol
+index 641947a..03a92b2 100644
+--- a/src/BEC_exp/BecToken.sol
++++ b/src/BEC_exp/BecToken_patch.sol
+@@ -285,6 +285,8 @@ contract PausableToken is StandardToken, Pausable {
+         require(cnt > 0 && cnt <= 20);
+         require(_value > 0 && balances[msg.sender] >= amount);
+ 
++        require(_value <= uint256(-1) / cnt, "Arithmetic overflow on amount");
++
+         balances[msg.sender] = balances[msg.sender].sub(amount);
+         for (uint256 i = 0; i < cnt; i++) {
+             balances[_receivers[i]] = balances[_receivers[i]].add(_value);
+@@ -299,7 +301,7 @@ contract PausableToken is StandardToken, Pausable {
+  *
+  * @dev Implementation of Bec Token based on the basic standard token.
+  */
+-contract BecToken is PausableToken {
++contract BecToken_patch is PausableToken {
+     /**
+      * Public variables of the token
+      * The following variables are OPTIONAL vanities. One does not have to include them.

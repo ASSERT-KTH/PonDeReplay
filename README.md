@@ -1,341 +1,249 @@
 # PonDeReplay
 
-A CLI tool to replay Ethereum transactions with patched contract bytecode. Perfect for verifying vulnerability patches by replaying historical transactions with fixed contract code.
+Replay Ethereum transactions with patched contract bytecode. Built for verifying
+security patches by re-executing historical transactions against fixed code while
+preserving as much on-chain context as possible.
 
 ## Overview
 
-PonDeReplay allows you to:
+PonDeReplay lets you:
 
-1. **Replay historical transactions** - Fetch any transaction from the blockchain
-2. **Patch contract bytecode** - Replace the vulnerable contract with your patched version
-3. **Verify patches** - Execute the transaction with the new code to confirm the fix works
-4. **Review in context** - Analyze how transactions would behave with your security patch
+1. **Replay historical transactions** on pre-transaction state (block \(N-1\))
+2. **Patch contract bytecode** via `eth_call` state overrides or a local Anvil fork
+3. **Verify patches** — block the attack tx while benign history still passes
+4. **Sanity-check the replay itself** — original bytecode must reproduce chain behaviour before patch results are trusted
 
-### Use Case
+### Typical workflow
 
-You have a deployed contract with a vulnerability. You've written a patch, but want to verify that:
-
-- All historical transactions would work correctly with the patch
-- The patch doesn't break existing functionality
-- The patch handles edge cases properly
+1. Replay with **original** bytecode (`on_original`) — confirm success/revert matches the chain
+2. Replay with **patch** bytecode — attack should revert; benign txs should still succeed
+3. Use **`compare-patch`** for a single attack tx, or **`replay-history`** / the DFHL experiment script for many txs
 
 ## Installation
 
 ### Prerequisites
 
-- Python 3.8+
-- Access to an Ethereum RPC endpoint
+- Python 3.9+
+- Ethereum RPC endpoint (`ETH_RPC_URL`)
+- [Foundry](https://book.getfoundry.sh/) (`anvil`) — optional but recommended for same-block setup and timestamp-sensitive replays
 
-### Setup
+### From source
 
 ```bash
-# Install in development mode
-pip install -e .
-
-# Or install with dev dependencies
+git clone https://github.com/Deffensive/PonDeReplay.git
+cd PonDeReplay
 pip install -e ".[dev]"
 ```
 
-## Configuration
+### Configuration
 
 ```bash
-export ETH_RPC_URL="https://eth-mainnet.alchemyapi.io/v2/YOUR_KEY"
+cp .env.example .env
+# Edit .env — at minimum:
+export ETH_RPC_URL="https://api-ethereum-mainnet.n.dwellir.com/YOUR_API_KEY"
+export ETHERSCAN_API_KEY="..."   # optional; needed for tx-list / replay-history via Etherscan
 ```
 
-## Quick Start (single transaction)
+## Quick start (single transaction)
+
+**Patch replay** (gas bump on Anvil is **on by default** when `--bytecode-file` is set):
 
 ```bash
 pondereplay replay \
-  --rpc-url $ETH_RPC_URL \
-  --tx-hash 0x1234567890abcdef... \
-  --contract-address 0xAbCdEf... \
-  --bytecode-file ./patched-contract.hex
-```
-
-> **Pre-transaction state:** by default, all replays execute on the state at block \\(N-1\\),
-> i.e. the block immediately before the original transaction's block \\(N\\).
-
-You can also omit `--bytecode-file` / `--bytecode-hex` to replay using the **original**
-on-chain bytecode at block \\(N-1\\). This is equivalent to a sanity-style replay.
-
-## Sanity Check
-
-Before trusting replay results with patched bytecode, verify the replay mechanism works correctly:
-
-```bash
-pondereplay sanity-check \
-  --rpc-url $ETH_RPC_URL \
-  --tx-hash 0x1234567890abcdef... \
-  --contract-address 0xAbCdEf... \
-  --verbose
-```
-
-This command:
-1. Fetches the **original** contract bytecode
-2. Replays the transaction with the **original** bytecode
-3. Verifies the result matches the original transaction receipt
-
-If the sanity check **fails**, something is wrong with your replay setup. If it **passes**, you can trust replays with patched bytecode.
-
-## Workflow
-
-1. **Sanity check (optional but recommended)**:
-   ```bash
-   pondereplay sanity-check \
-     --tx-hash $TX_HASH \
-     --contract-address $CONTRACT_ADDRESS \
-     --verbose
-   ```
-
-2. **Compile your patched contract** with Foundry:
-   ```bash
-   forge build
-   jq '.bytecode.object' out/MyContract.sol/MyContract.json > patched.json
-   ```
-
-3. **Find a transaction to replay** (from Etherscan, your logs, etc.)
-
-4. **Replay with the patch**:
-   ```bash
-   pondereplay replay \
-     --tx-hash $TX_HASH \
-     --contract-address $CONTRACT_ADDRESS \
-     --bytecode-file patched.json \
-     --verbose
-   ```
-
-5. **Review results** - Check if the transaction succeeds with your patch
-
-## History Replay (all transactions)
-
-PonDeReplay can also replay a **full history of transactions** for a vulnerable contract.
-Each transaction is executed independently on the state at block \\(N-1\\) for that tx,
-with optional patched bytecode applied.
-
-### From Etherscan (mainnet/testnets)
-
-```bash
-pondereplay replay-history \
-  --rpc-url $ETH_RPC_URL \
-  --contract-address $CONTRACT \
-  --etherscan-api-key $ETHERSCAN_API_KEY \
-  --etherscan-network sepolia \
-  --bytecode-file patched.json \
-  --attack-tx 0xATTACKTX... \
-  --verbose
-```
-
-### From an explicit tx list file
-
-```bash
-pondereplay replay-history \
-  --rpc-url $ETH_RPC_URL \
-  --contract-address $CONTRACT \
-  --tx-list-file txs.txt \
-  --bytecode-file patched.json \
-  --verbose
-```
-
-Where `txs.txt` contains either:
-
-- One tx hash per line (blank lines and `#` comments ignored), or
-- JSON: `["0x...", "0x...", ...]` or `{"tx_hashes": ["0x...", ...]}`
-
-If you omit `--bytecode-file` / `--bytecode-hex`, `replay-history` will use the
-**original** contract bytecode for each transaction at its own block \\(N-1\\).
-
-## Transaction list export (`tx-list`)
-
-Sometimes you want to **inspect or select transactions first**, before replaying.
-`tx-list` fetches the transaction history for a contract from Etherscan and writes
-it to a JSON file.
-
-```bash
-pondereplay tx-list \
-  --rpc-url $ETH_RPC_URL \
+  --tx-hash 0xYOUR_TX \
   --contract-address 0xCONTRACT \
-  --etherscan-api-key $ETHERSCAN_API_KEY \
-  --etherscan-network mainnet \
-  --start-block 0 \
-  --end-block latest \
-  --limit 100 \
-  --output contract-txs.json
+  --bytecode-file ./patch.hex \
+  -v
 ```
 
-Notes:
+**Original bytecode sanity replay** (omit `--bytecode-file`, or pass `original.hex`):
 
-- **Output file**:
-  - If you omit `--output`, the file is named `<contract-address>.json`
-    (for example `0x418c24191ae947a78c99fdc0e45a1f96afb254be.json`).
-  - If you pass `--output path.json`, it writes there instead.
-- **Limiting results**:
-  - `--limit N` returns only the first `N` transactions (oldest-first ordering).
-  - If you omit `--limit`, the command returns as many transactions as Etherscan
-    allows for that address (subject to API caps).
-- **JSON structure**:
-  - `contract_address`: the address you queried
-  - `count`: number of hashes included in `tx_hashes`
-  - `tx_hashes`: array of transaction hashes as 0x-prefixed strings
-  - `source`: `"etherscan"`
-  - `network`: `"mainnet"`, `"sepolia"`, or `"holesky"`
+```bash
+pondereplay replay \
+  --tx-hash 0xYOUR_TX \
+  --contract-address 0xCONTRACT \
+  -v
+```
 
-You can then feed hashes from this JSON into `pondereplay replay` or
-`pondereplay replay-history` (via a small script or a `tx-list-file`).
+> Replays execute on state at block **\(N-1\)** (the block before the original tx).
 
-## Supported Bytecode Formats
+### Attack tx: original vs patch
 
-- Raw hex: `0x608060405234801561001057600080fd5b50...`
-- JSON artifacts (Foundry, Hardhat, Truffle)
-- Compiled contract JSON output
+```bash
+pondereplay compare-patch \
+  --tx-hash 0xATTACK_TX \
+  --contract-address 0xCONTRACT \
+  --bytecode-file ./patch.hex \
+  --original-bytecode-file ./original.hex \
+  --attack-tx \
+  -v
+```
 
-## Features
+Expect classification `effective_patch` when the attack reverts under patch but succeeded under original.
 
-- ✅ Fast replay using `eth_call` with state overrides
-- ✅ Works with any Ethereum RPC provider
-- ✅ No blockchain modification
-- ✅ Supports multiple bytecode formats
-- ✅ Batch replay capability
-- ✅ Verbose debugging mode
-- ✅ Python API for integration
+## Commands
 
-## Documentation
-
-See full documentation in the README sections below, or use:
+| Command | Purpose |
+|---------|---------|
+| `replay` | Single tx with optional patched bytecode |
+| `compare-patch` | Original + patch on one tx, with classification |
+| `sanity-check` | Original bytecode only; compare to chain receipt |
+| `replay-history` | Batch replay from Etherscan or a tx list file |
+| `tx-list` | Export contract tx history from Etherscan to JSON |
+| `batch-replay` | Scan blocks for txs to an address (slow; prefer `tx-list`) |
+| `trace-analyze` | Inspect a transaction trace |
 
 ```bash
 pondereplay --help
 pondereplay replay --help
 ```
 
-## How It Works
+## Faithful replay
 
-PonDeReplay uses the `eth_call` RPC method with state overrides:
+PonDeReplay uses a **tiered** strategy:
 
-1. Fetch the original transaction details
-2. Use `eth_call` with `state_override` parameter to patch the contract bytecode
-3. Execute the transaction with the patched code
-4. Capture return values, logs, gas usage, and execution status
+| Tier | When | Mode |
+|------|------|------|
+| Fast | No same-block setup issue | `eth_call` at \(N-1\) |
+| Same-block override | Contract created earlier in block \(N\) | `eth_call_same_block_override` |
+| Anvil strict | Timestamp / context mismatch or `--strict-anvil` | `anvil_indexed_strict` |
 
-This approach:
-- Doesn't require special node methods
-- Works with standard RPC providers (Alchemy, Infura, etc.)
-- Completes in a single JSON-RPC call
-- Doesn't modify blockchain state
+**Preflight** runs before each replay: block index, same-block contract creations, time/context warnings, and whether escalation is needed.
 
-## Sanity Check (Validation)
+Useful flags:
 
-Before trusting your patched bytecode results, PonDeReplay provides a **sanity check** mechanism:
+| Flag | When to use |
+|------|-------------|
+| `--use-anvil` | Prefer Anvil when same-block setup is required |
+| `--strict-anvil` | Force timestamp-aligned Anvil replay |
+| `--bump-gas-for-patch` | Re-estimate gas on Anvil ( **default on** when patch bytecode is provided; use `--no-bump-gas-for-patch` to disable) |
+| `--auto-strict-on-mismatch` | Escalate when fast replay disagrees with chain (default: on) |
 
+See [docs/timestamp-dependence.md](docs/timestamp-dependence.md) for why `block.timestamp` matters and how strict Anvil mitigates it.
+
+## History replay
+
+```bash
+pondereplay replay-history \
+  --contract-address 0xCONTRACT \
+  --tx-list-file txs.json \
+  --bytecode-file patch.hex \
+  --attack-tx 0xATTACK... \
+  --output json \
+  -v
 ```
-Original TX
-    ↓
-Fetch orig. bytecode
-    ↓
-Replay with orig. bytecode
-    ↓
-Compare with original receipt
-    ↓
-✓ If matches: Replay mechanism is working correctly
-✗ If differs: Something is wrong with your setup
+
+`tx-list-file` accepts one hash per line, or JSON `["0x...", ...]` / `{"tx_hashes": [...]}`.
+
+Without `--bytecode-file`, each tx is replayed with on-chain bytecode at its own \(N-1\).
+
+## DFHL experiment (batch original + patch)
+
+For the [dfhl-invariants](https://github.com/Deffensive/dfhl-invariants) dataset:
+
+```bash
+python scripts/run_dfhl_full_experiment.py \
+  --verbose \
+  --skip-existing
 ```
 
-The sanity check:
-1. Fetches the **original** contract bytecode from the blockchain
-2. Replays the transaction using **only the original bytecode** (no patch)
-3. Compares the result with the original transaction receipt
-4. Confirms the replay mechanism works
+For each case this:
 
-**This proves your replay mechanism is correct before testing patches.** If the sanity check passes, you can trust patched bytecode results are accurate.
+1. Replays all txs from `dfhl-invariants/src/<case>/txs/` on **original** and **patch**
+2. Writes results under `dfhl-invariants/results/pondereplay/<case>/{original,patch}/`
+3. Produces `soundness.json` with per-tx **`on_original`** sanity (does original replay match chain?) and patch verdicts
 
-## Advanced Usage
+Options:
 
-### Python Integration
+```bash
+--only 202603_AlkemiEarn 202210_Uerii   # subset of cases
+--limit-tx 20                            # cap txs per case
+--bump-gas-for-original                  # also bump gas on original variant
+--reclassify-only                        # rebuild soundness from saved replays
+--strict-anvil                           # force strict Anvil for all replays
+```
+
+AlkemiEarn-specific script and notes: [docs/recap.md](docs/recap.md).
+
+```bash
+./scripts/run_alkemi_experiment.sh
+```
+
+## Reading output
+
+JSON results include execution outcome fields (independent of replay machinery success):
+
+```json
+{
+  "onchain_reverted": false,
+  "local_reverted": true,
+  "revert_message": "execution reverted: only governance can call earn()",
+  "local_failure_reason": "revert_other",
+  "faithful_to_chain": true,
+  "replay_mode": "anvil_indexed_strict_patched",
+  "diagnostics": {
+    "faithfulness": "faithful",
+    "warnings": []
+  }
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `onchain_reverted` | Did the tx revert on chain? |
+| `local_reverted` | Did the local replay revert? |
+| `faithful_to_chain` | Does local status match chain? (replay sanity) |
+| `local_failure_reason` | `out_of_gas`, `patch_guard`, `revert_other` |
+| `diagnostics.faithfulness` | `faithful`, `approximate`, or `unfaithful` |
+
+**`on_original` (experiment soundness):** per-tx check that original-bytecode replay matches chain before attributing failures to the patch.
+
+## Supported bytecode formats
+
+- Raw hex (`0x6080…` or without prefix)
+- Foundry / Hardhat / Truffle JSON artifacts
+- Raw `.bin` files
+
+## Python API
 
 ```python
 from pondereplay import TransactionReplayer
 
-replayer = TransactionReplayer("https://eth-mainnet.example.com")
+replayer = TransactionReplayer(
+    "https://api-ethereum-mainnet.n.dwellir.com/YOUR_KEY",
+    bump_gas_for_patch=True,
+)
 
 result = replayer.replay_transaction(
     tx_hash="0x...",
     contract_address="0x...",
     new_bytecode="0x...",
-    verbose=True
+    verbose=True,
 )
 
-if result.success:
-    print(f"✓ Success! Return value: {result.return_value}")
-else:
-    print(f"✗ Failed: {result.error}")
-```
-
-### Sanity Check (Python API)
-
-```python
-# Validate replay mechanism works with original bytecode
-result, matches = replayer.sanity_check(
+orig, patched, report = replayer.replay_original_and_patched(
     tx_hash="0x...",
     contract_address="0x...",
-    verbose=True
+    patched_bytecode="0x...",
+    original_bytecode="0x...",
+    is_attack_tx=True,
 )
-
-if matches:
-    print("✓ Sanity check passed - replay mechanism is working!")
-else:
-    print("✗ Sanity check failed - replay output doesn't match original")
-```
-
-### Batch Replay
-
-```python
-for tx_hash in transaction_list:
-    result = replayer.replay_transaction(
-        tx_hash=tx_hash,
-        contract_address=VULNERABLE_CONTRACT,
-        new_bytecode=PATCH_BYTECODE,
-    )
-    print(f"{tx_hash}: {'✓' if result.success else '✗'}")
-```
-
-## Output Example
-
-```json
-{
-  "success": true,
-  "tx_hash": "0xabcd1234...",
-  "block_number": 17564900,
-  "return_value": "0x0000000000000000000000000000000000000000000000000000000000000001",
-  "gas_used": 50000,
-  "output": "0x0000000000000000000000000000000000000000000000000000000000000001",
-  "logs": []
-}
+print(report["classification"])
 ```
 
 ## Development
 
 ```bash
-# Install dev dependencies
 pip install -e ".[dev]"
-
-# Run tests
 pytest tests/
-
-# Run tests with coverage
 pytest tests/ --cov=pondereplay --cov-report=html
-
-# Format code
 black pondereplay/ tests/
-
-# Type check (optional)
-mypy pondereplay/
 ```
-
-See [tests/README.md](tests/README.md) for detailed testing documentation.
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).
 
 ## Contributing
 
-Contributions welcome! Open an issue or PR for bugs, features, or improvements.
+Issues and PRs welcome.

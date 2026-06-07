@@ -1,0 +1,23 @@
+[
+  {
+    "tx_hash": "0xf4a3d0e01bbca6c114954d4a49503fc94dfdbc864bded5530b51a207640d86b5",
+    "block_number": 15767838,
+    "tx_index": 6,
+    "timestamp": 1666009871,
+    "from_addr": "0x0000000000000000000000000000000000000000",
+    "to_addr": "0x418c24191ae947a78c99fdc0e45a1f96afb254be",
+    "input_data": "0x1249c58b",
+    "value": 100000000000000000,
+    "is_internal": true,
+    "reverted": false,
+    "sources": [
+      "internal_trace"
+    ],
+    "contract_name": "Token",
+    "canonical_sig": "mint()",
+    "selector": "0x1249c58b",
+    "call_depth": 1,
+    "call_type": "CALL",
+    "gas_used": 30122
+  }
+]

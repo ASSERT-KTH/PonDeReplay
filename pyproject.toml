@@ -1,22 +1,54 @@
 [build-system]
-requires = ["setuptools>=45", "wheel"]
+requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "pondereplay"
-version = "0.1.0"
-description = "CLI tool to replay Ethereum transactions with patched contract bytecode using Foundry"
+version = "0.2.0"
+description = "Replay Ethereum transactions with patched contract bytecode"
 readme = "README.md"
-requires-python = ">=3.8"
-license = {text = "MIT"}
+requires-python = ">=3.9"
+license = "MIT"
 authors = [{name = "PonDeReplay Contributors"}]
+keywords = [
+    "ethereum",
+    "replay",
+    "transactions",
+    "bytecode",
+    "smart-contracts",
+    "security",
+    "vulnerability",
+    "patch",
+    "web3",
+    "eth_call",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+    "Topic :: Software Development :: Testing",
+    "Typing :: Typed",
+]
 
 dependencies = [
     "web3>=6.0.0",
     "click>=8.0.0",
     "python-dotenv>=0.19.0",
     "requests>=2.28.0",
+    "eth-account>=0.9.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Deffensive/PonDeReplay"
+Repository = "https://github.com/Deffensive/PonDeReplay"
+Issues = "https://github.com/Deffensive/PonDeReplay/issues"
 
 [project.scripts]
 pondereplay = "pondereplay.cli:main"
@@ -26,6 +58,24 @@ dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "pytest-mock>=3.10.0",
-    "black>=22.0.0",
+    "black~=26.5",
     "mypy>=0.900",
 ]
+
+[tool.setuptools.packages.find]
+include = ["pondereplay*"]
+
+[tool.setuptools.package-data]
+pondereplay = ["py.typed"]
+
+[tool.black]
+line-length = 88
+target-version = ["py39"]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
