@@ -92,6 +92,7 @@ class TransactionReplayer:
         auto_strict_on_mismatch: bool = True,
         anvil_bin: str = "anvil",
         bump_gas_for_patch: bool = False,
+        compare_state: bool = False,
     ):
         self.rpc_url = rpc_url
         self.fork_url = fork_url or rpc_url
@@ -101,6 +102,9 @@ class TransactionReplayer:
         self.auto_strict_on_mismatch = auto_strict_on_mismatch
         self.anvil_bin = anvil_bin
         self.bump_gas_for_patch = bump_gas_for_patch
+        # State-effect comparison needs per-tx state diffs, which only the Anvil tier
+        # produces; enabling it forces the Anvil tier for original/patched runs.
+        self.compare_state = compare_state
         self.w3 = Web3(Web3.HTTPProvider(rpc_url))
 
         if not self.w3.is_connected():
@@ -354,16 +358,122 @@ class TransactionReplayer:
         )
 
         chain_ok = receipt.get("status", 0) == 1
+        state = self._build_state_comparison(tx_hash, original_result, patched_result)
         report = build_classification_report(
             original_result,
             patched_result,
             chain_tx_succeeded=chain_ok,
             is_attack_tx=is_attack_tx,
             include_trace=False,
+            state=state,
         )
         patched_result.patch_classification = report["classification"]
         original_result.patch_classification = report["classification"]
         return original_result, patched_result, report
+
+    def _live_rpc_call(self, method: str, params: list) -> Any:
+        """Adapter so state_diff.capture_tx can query the source RPC via web3."""
+        resp = self.w3.provider.make_request(method, params)
+        if resp.get("error"):
+            raise RuntimeError(resp["error"])
+        return resp.get("result")
+
+    def _build_state_comparison(
+        self,
+        tx_hash: str,
+        original_result: ReplayResult,
+        patched_result: ReplayResult,
+    ) -> Dict[str, Any]:
+        """
+        Compare the patched replay's state effect against the original replay's, and
+        gate both against live chain. See docs/state-comparison.md.
+
+        Only available when both replays captured state (Anvil tier). The fast eth_call
+        tier produces no state diff, so the comparison is reported as unavailable.
+        """
+        from .state_compare import gate as state_gate, preservation_test
+        from .state_diff import StateCapture, capture_tx
+
+        orig_dict = (original_result.state_changes or {}).get("state_capture")
+        patch_dict = (patched_result.state_changes or {}).get("state_capture")
+        if not orig_dict or not patch_dict:
+            return {
+                "available": False,
+                "reason": "no state capture (fast eth_call tier produces no state diff; "
+                "use the Anvil tier for state comparison)",
+            }
+
+        original_cap = StateCapture.from_dict(orig_dict)
+        patched_cap = StateCapture.from_dict(patch_dict)
+
+        def _ctx_faithful(diag: Dict[str, Any]) -> bool:
+            return not (
+                diag.get("context_unfaithful") or diag.get("time_context_mismatch")
+            )
+
+        odiag = original_result.diagnostics or {}
+        pdiag = patched_result.diagnostics or {}
+        # Gate compares original-replay vs live -> use original's context fidelity.
+        gate_context_faithful = _ctx_faithful(odiag)
+        # Test compares the two replays -> faithful only if both are.
+        test_context_faithful = _ctx_faithful(odiag) and _ctx_faithful(pdiag)
+
+        live_cap = None
+        try:
+            live_cap = capture_tx(self._live_rpc_call, tx_hash)
+        except Exception:
+            live_cap = None
+
+        test = preservation_test(
+            original_cap, patched_cap, context_faithful=test_context_faithful
+        )
+        gate_report = (
+            state_gate(original_cap, live_cap, context_faithful=gate_context_faithful)
+            if live_cap is not None
+            else None
+        )
+
+        gas_bumped = bool(pdiag.get("gas_bumped_for_patch"))
+        # ``state_equivalent`` (test: patched vs original, same fork context) is the
+        # decisive state signal. ``gate_faithful`` is the STRUCTURAL live gate (status /
+        # account-scope / code) — it tolerates value-level accrual drift and is
+        # load-bearing only where the verdict depends on state (the both-succeed case).
+        return {
+            "available": True,
+            "context_faithful": test_context_faithful,
+            "state_equivalent": test.state_equivalent,
+            "status_faithful": bool(original_result.success),
+            "gate_faithful": (
+                gate_report.state_equivalent if gate_report is not None else None
+            ),
+            "failed_subcalls": {
+                "original": original_cap.failed_subcalls,
+                "patched": patched_cap.failed_subcalls,
+                "live": live_cap.failed_subcalls if live_cap is not None else None,
+            },
+            "gas_limit_potentially_confounded": gas_bumped,
+            "test": test.to_dict(),
+            "live_gate": {
+                "kind": "structural",
+                "available": gate_report is not None,
+                "context_faithful": gate_context_faithful,
+                "state_equivalent": (
+                    gate_report.state_equivalent if gate_report is not None else None
+                ),
+                "structural_divergence_count": (
+                    len(gate_report.critical) if gate_report is not None else None
+                ),
+                "value_drift_count": (
+                    len(gate_report.value_drift) if gate_report is not None else None
+                ),
+                "report": gate_report.to_dict() if gate_report is not None else None,
+            },
+            "captures": {
+                "original": orig_dict,
+                "patched": patch_dict,
+                "live": live_cap.to_dict() if live_cap is not None else None,
+            },
+        }
 
     def _execute_replay(
         self,
@@ -377,8 +487,17 @@ class TransactionReplayer:
         verbose: bool,
         replay_mode_suffix: str,
     ) -> ReplayResult:
-        bump_on_anvil = self.bump_gas_for_patch or replay_mode_suffix == "patched"
-        if self.prefer_anvil_when_escalated and escalate:
+        # In state-comparison mode both runs must be treated identically: give both gas
+        # headroom (else the original can OOG where the patched does not) and always use
+        # the strict, timestamp/base-fee/coinbase-aligned context so the replay reproduces
+        # the on-chain execution faithfully.
+        bump_on_anvil = (
+            self.bump_gas_for_patch
+            or replay_mode_suffix == "patched"
+            or self.compare_state
+        )
+        strict_context = self.strict_anvil_context or self.compare_state
+        if self.compare_state or (self.prefer_anvil_when_escalated and escalate):
             result = self._replay_with_anvil(
                 tx,
                 receipt,
@@ -386,7 +505,7 @@ class TransactionReplayer:
                 bytecode,
                 diagnostics,
                 trace_analysis,
-                strict_context=self.strict_anvil_context,
+                strict_context=strict_context,
                 verbose=verbose,
                 bump_gas=bump_on_anvil,
             )

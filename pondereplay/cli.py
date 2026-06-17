@@ -826,6 +826,12 @@ def trace_analyze(
     help="Auto-escalate to strict Anvil when replay result mismatches likely on-chain behavior",
 )
 @click.option(
+    "--compare-state",
+    is_flag=True,
+    help="Compare on-chain state effects (storage/logs/balances), not just revert status. "
+    "Forces the Anvil tier and gates against live chain (see docs/state-comparison.md)",
+)
+@click.option(
     "--output",
     type=click.Choice(["json", "text"]),
     default="json",
@@ -842,6 +848,7 @@ def compare_patch(
     use_anvil: bool,
     strict_anvil: bool,
     auto_strict_on_mismatch: bool,
+    compare_state: bool,
     output: str,
     verbose: bool,
 ):
@@ -862,6 +869,7 @@ def compare_patch(
             prefer_anvil_when_escalated=use_anvil,
             strict_anvil_context=strict_anvil,
             auto_strict_on_mismatch=auto_strict_on_mismatch,
+            compare_state=compare_state,
         )
         orig_result, patch_result, report = replayer.replay_original_and_patched(
             tx_hash=tx_hash,
@@ -885,6 +893,29 @@ def compare_patch(
             click.echo(f"Patched success: {patch_result.success}")
             if patch_result.error:
                 click.echo(f"Patched error: {patch_result.error}")
+            state = report.get("state_comparison")
+            if state:
+                if not state.get("available"):
+                    click.echo(f"State comparison: unavailable ({state.get('reason')})")
+                else:
+                    effect = {True: "preserved", False: "changed"}.get(
+                        state.get("state_equivalent"), "—"
+                    )
+                    valid = {True: "yes", False: "no"}.get(
+                        state.get("gate_faithful"), "—"
+                    )
+                    lg = state.get("live_gate") or {}
+                    click.echo(f"Patch effect (patched vs original): {effect}")
+                    click.echo(
+                        f"Replay valid (vs chain): {valid} "
+                        f"(chain mismatches={lg.get('structural_divergence_count')}, "
+                        f"tolerated drift={lg.get('value_drift_count')})"
+                    )
+                    fs = state.get("failed_subcalls") or {}
+                    click.echo(
+                        "Failed subcalls (live/orig/patch): "
+                        f"{fs.get('live')}/{fs.get('original')}/{fs.get('patched')}"
+                    )
         sys.exit(0)
     except Exception as e:
         click.echo(f"❌ Error: {str(e)}", err=True)

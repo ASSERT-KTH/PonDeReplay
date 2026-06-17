@@ -384,10 +384,14 @@ class AnvilIndexedReplayer:
         local = Web3(Web3.HTTPProvider(self.rpc_url))
 
         def _fund_if_needed(from_addr: str) -> None:
+            # 1e24 wei (1,000,000 ETH): enough headroom for value + gas*price on
+            # high-value txs. Applied identically to both original/patched runs, so it
+            # cancels in the same-context test; the sender balance is value-drift in the
+            # live gate anyway.
             _rpc_succeeded(
                 self.rpc_url,
                 "anvil_setBalance",
-                [Web3.to_checksum_address(from_addr), hex(10**21)],
+                [Web3.to_checksum_address(from_addr), hex(10**24)],
             )
 
         for i, h in enumerate(prior_tx_hashes):
@@ -474,6 +478,7 @@ class AnvilIndexedReplayer:
                 timestamp_source = "anvil_default"
 
             mined = local.eth.get_transaction_receipt(target_local_hash)
+            state_capture = self._capture_state(target_local_hash)
             mined_block_number = int(mined["blockNumber"])
             local_block = local.eth.get_block(mined_block_number)
             local_timestamp = normalize_block_timestamp(
@@ -600,6 +605,11 @@ class AnvilIndexedReplayer:
                 replay_mode="anvil_indexed",
                 diagnostics=diag,
                 error=None if success else revert_reason,
+                state_changes=(
+                    {"state_capture": state_capture.to_dict()}
+                    if state_capture
+                    else None
+                ),
             )
         except Exception as e:
             return ReplayResult(
@@ -619,6 +629,15 @@ class AnvilIndexedReplayer:
             )
         finally:
             self.stop()
+
+    def _capture_state(self, local_tx_hash: str) -> Any:
+        """Capture the canonical state effect of a mined local tx (best-effort)."""
+        from .state_diff import capture_tx
+
+        return capture_tx(
+            lambda method, params: _rpc_call(self.rpc_url, method, params),
+            local_tx_hash,
+        )
 
     @staticmethod
     def prior_tx_hashes_in_block(
