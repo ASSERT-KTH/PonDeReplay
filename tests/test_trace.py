@@ -1,6 +1,54 @@
 """Tests for trace analysis."""
 
-from pondereplay.trace import TraceAnalysis, analyze_transaction_trace
+from pondereplay.trace import (
+    TraceAnalysis,
+    analyze_transaction_trace,
+    count_failed_subcalls,
+    failed_call_frames,
+)
+
+
+class TestFailedSubcalls:
+    def _trace(self):
+        # root OK; child A reverts (swallowed); A's child OOG; sibling B OK.
+        return {
+            "type": "CALL",
+            "to": "0xroot",
+            "calls": [
+                {
+                    "type": "CALL",
+                    "to": "0xA",
+                    "error": "execution reverted",
+                    "revertReason": "boom",
+                    "calls": [
+                        {"type": "CALL", "to": "0xA1", "error": "out of gas"},
+                    ],
+                },
+                {"type": "STATICCALL", "to": "0xB"},
+            ],
+        }
+
+    def test_counts_nested_errors_excludes_root(self):
+        assert count_failed_subcalls(self._trace()) == 2
+
+    def test_include_root_counts_top_level_error(self):
+        t = {"type": "CALL", "to": "0xroot", "error": "reverted", "calls": []}
+        assert count_failed_subcalls(t, include_root=False) == 0
+        assert count_failed_subcalls(t, include_root=True) == 1
+
+    def test_no_errors_is_zero(self):
+        t = {"type": "CALL", "calls": [{"type": "CALL", "calls": []}]}
+        assert count_failed_subcalls(t) == 0
+
+    def test_failed_call_frames_detail(self):
+        frames = failed_call_frames(self._trace())
+        tos = {f["to"] for f in frames}
+        assert tos == {"0xA", "0xA1"}
+        assert any(f["revertReason"] == "boom" for f in frames)
+
+    def test_handles_non_dict(self):
+        assert count_failed_subcalls(None) == 0
+        assert failed_call_frames("nope") == []
 
 
 class TestAnalyzeTransactionTrace:

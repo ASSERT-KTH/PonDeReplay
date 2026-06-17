@@ -143,6 +143,60 @@ def _walk_trace(
         )
 
 
+def count_failed_subcalls(
+    trace_root: Dict[str, Any],
+    *,
+    include_root: bool = False,
+) -> int:
+    """
+    Count call frames that halted with an error in a ``callTracer`` trace.
+
+    A failed subcall is any non-root frame with a non-empty ``error`` (revert, out of
+    gas, invalid opcode, ...). When an attacker swallows an inner revert (try/catch or an
+    unchecked low-level ``call``), only that inner frame carries ``error`` while the
+    top-level ``status`` stays 1 — so this counts exactly those blocked-but-swallowed
+    calls. Set ``include_root`` to also count a top-level failure.
+    """
+    if not isinstance(trace_root, dict):
+        return 0
+
+    def walk(node: Dict[str, Any], is_root: bool) -> int:
+        total = 0
+        if not (is_root and not include_root):
+            if (node.get("error") or "").strip():
+                total += 1
+        for child in node.get("calls") or []:
+            if isinstance(child, dict):
+                total += walk(child, is_root=False)
+        return total
+
+    return walk(trace_root, is_root=True)
+
+
+def failed_call_frames(trace_root: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """List non-root frames that errored: ``{to, type, error, revertReason}``."""
+    out: List[Dict[str, Any]] = []
+    if not isinstance(trace_root, dict):
+        return out
+
+    def walk(node: Dict[str, Any], is_root: bool) -> None:
+        if not is_root and (node.get("error") or "").strip():
+            out.append(
+                {
+                    "to": node.get("to"),
+                    "type": node.get("type"),
+                    "error": node.get("error"),
+                    "revertReason": node.get("revertReason"),
+                }
+            )
+        for child in node.get("calls") or []:
+            if isinstance(child, dict):
+                walk(child, is_root=False)
+
+    walk(trace_root, is_root=True)
+    return out
+
+
 def analyze_transaction_trace(
     w3: Web3,
     tx_hash: str,
