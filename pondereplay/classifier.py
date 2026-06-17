@@ -9,24 +9,74 @@ from typing import Any, Dict, Optional
 from .replayer import ReplayResult
 
 
+def _state_says_diverged(state: Optional[Dict[str, Any]]) -> Optional[bool]:
+    """
+    Resolve the state-comparison axis to a tri-state from the **test** (patched-replay
+    vs original-replay), which is the sound, same-context comparison.
+
+    Returns:
+    - None  -> no usable state signal (capture unavailable)
+    - True  -> patched state differs from original (critical divergence)
+    - False -> patched state matches original
+
+    The live-state diff is handled separately as the *structural* gate (see
+    ``_gate_failed_structural``); it is not part of this signal, because comparing the
+    local fork against real chain induces benign value drift (interest accrual) that the
+    same-context test cancels (see docs/state-comparison.md).
+    """
+    if not state or not state.get("available"):
+        return None
+    eq = state.get("state_equivalent")
+    if eq is None:
+        return None
+    return not eq
+
+
+def _gate_failed_structural(state: Optional[Dict[str, Any]]) -> bool:
+    """
+    True if the STRUCTURAL live gate fired (original replay diverged from live chain in
+    status / account-scope / code — i.e. did not reproduce reality). Value-level accrual
+    drift is tolerated by the gate, so this does not fire on benign drift.
+
+    Load-bearing only where the verdict depends on the state comparison (the both-succeed
+    branches); a clean top-level status flip is decided by status alone.
+    """
+    return bool(
+        state and state.get("available") and state.get("gate_faithful") is False
+    )
+
+
 def classify_patch_effect(
     original_replay: ReplayResult,
     patched_replay: ReplayResult,
     *,
     chain_tx_succeeded: bool = True,
     is_attack_tx: bool = False,
+    state: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
-    Classify patch experiment outcome.
+    Classify patch experiment outcome. Labels are kind-specific so the *quality* of an
+    outcome is never ambiguous (the old shared ``ineffective_patch`` meant "good" for
+    benign but "bad" for attack):
 
-    Returns one of:
-    - effective_patch
-    - ineffective_patch
-    - unfaithful_replay
-    - inconclusive
+    Benign tx (patch should preserve the live behaviour):
+    - ``preserved``        — replay reproduces chain AND the patch changed nothing
+    - ``needs_inspection`` — the patch changed a benign tx (status or state); inspect (it
+                             may be a mislabeled malicious tx or a real regression)
+    - ``inconclusive``     — replay not faithful, can't judge
+
+    Attack tx (patch should change/neutralise the exploit):
+    - ``effective_patch``   — exploit blocked (top-level revert, or its state effect gone)
+    - ``ineffective_patch`` — exploit still lands unchanged
+    - ``inconclusive``      — replay didn't reproduce the exploit
+
+    Plus ``unfaithful_replay`` when same-block setup wasn't honoured.
+
+    ``state`` is the optional state-comparison result (see ``state_compare``): the
+    same-context test (``state_equivalent``) decides whether the patch changed the state
+    effect, and the structural live gate (``gate_faithful``) decides whether the original
+    replay reproduced reality.
     """
-    orig_diag = (original_replay.diagnostics or {}).get("faithfulness", "approximate")
-    patch_diag = (patched_replay.diagnostics or {}).get("faithfulness", "approximate")
 
     def _faithful_mode(mode: str) -> bool:
         return "same_block" in mode or mode.startswith("anvil_indexed")
@@ -36,6 +86,9 @@ def classify_patch_effect(
             patched_replay.replay_mode
         ):
             return "unfaithful_replay"
+
+    diverged = _state_says_diverged(state)
+    gate_failed = _gate_failed_structural(state)
 
     if is_attack_tx:
         if chain_tx_succeeded and not original_replay.success:
@@ -52,24 +105,38 @@ def classify_patch_effect(
                 return "inconclusive"
             return "effective_patch"
         if chain_tx_succeeded and original_replay.success and patched_replay.success:
+            # Top-level status unchanged: only the same-context state test can tell
+            # whether the exploit's effect was neutralized (e.g. a reverted sub-call the
+            # attacker swallowed). Here the structural gate is load-bearing: if the
+            # original replay didn't structurally reproduce live, we can't conclude.
+            if diverged is True:
+                return "effective_patch"
+            if gate_failed:
+                return "inconclusive"
             return "ineffective_patch"
         if not chain_tx_succeeded:
             return "inconclusive"
         return "inconclusive"
 
-    # Benign tx: patch should preserve success
-    if original_replay.success and patched_replay.success:
-        return "ineffective_patch"
-    if original_replay.success and not patched_replay.success:
+    # Benign tx: the patch should preserve the live behaviour. "preserved" requires the
+    # replay to reproduce chain (gate) AND the patch to change nothing (test). Any change
+    # the patch introduces — a different state effect, or breaking the tx by reverting —
+    # is flagged for manual inspection (could be a mislabeled malicious tx).
+    if not original_replay.success:
+        return "inconclusive"  # replay didn't reproduce the benign tx
+    if not patched_replay.success:
         patch_diag = patched_replay.diagnostics or {}
         if patch_diag.get("local_failure_reason") == "out_of_gas":
             return "inconclusive"
         if patch_diag.get("trace_out_of_gas_on_impl"):
             return "inconclusive"
-        return "effective_patch"
-    if not original_replay.success and not patched_replay.success:
-        return "inconclusive"
-    return "inconclusive"
+        return "needs_inspection"  # patch broke a benign tx (now reverts)
+    # Both succeed.
+    if gate_failed:
+        return "inconclusive"  # original replay not faithful to chain
+    if diverged is True:
+        return "needs_inspection"  # patch changed the state effect of a benign tx
+    return "preserved"
 
 
 def build_classification_report(
@@ -80,6 +147,7 @@ def build_classification_report(
     is_attack_tx: bool = False,
     trace_summary: Optional[Dict[str, Any]] = None,
     include_trace: bool = False,
+    state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Build a JSON-serializable classification report."""
     classification = classify_patch_effect(
@@ -87,6 +155,7 @@ def build_classification_report(
         patched,
         chain_tx_succeeded=chain_tx_succeeded,
         is_attack_tx=is_attack_tx,
+        state=state,
     )
     report: Dict[str, Any] = {
         "classification": classification,
@@ -105,6 +174,8 @@ def build_classification_report(
             "replay_mode": patched.replay_mode,
         },
     }
+    if state is not None:
+        report["state_comparison"] = state
     if include_trace and trace_summary:
         report["trace"] = trace_summary
     return report
