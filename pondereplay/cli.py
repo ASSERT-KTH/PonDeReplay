@@ -829,7 +829,7 @@ def trace_analyze(
     "--compare-state",
     is_flag=True,
     help="Compare on-chain state effects (storage/logs/balances), not just revert status. "
-    "Forces the Anvil tier and gates against live chain (see docs/state-comparison.md)",
+    "Forces the Anvil tier and checks the replay against live chain (see docs/state-comparison.md)",
 )
 @click.option(
     "--output",
@@ -901,15 +901,19 @@ def compare_patch(
                     effect = {True: "preserved", False: "changed"}.get(
                         state.get("state_equivalent"), "—"
                     )
-                    valid = {True: "yes", False: "no"}.get(
-                        state.get("gate_faithful"), "—"
+                    reproduces = {True: "yes", False: "no"}.get(
+                        state.get("reproduces_chain"), "—"
                     )
-                    lg = state.get("live_gate") or {}
+                    live_status = {1: "success", 0: "reverted"}.get(
+                        state.get("live_status"), "—"
+                    )
+                    cr = state.get("chain_reproduction") or {}
+                    click.echo(f"Live tx status (on-chain): {live_status}")
                     click.echo(f"Patch effect (patched vs original): {effect}")
                     click.echo(
-                        f"Replay valid (vs chain): {valid} "
-                        f"(chain mismatches={lg.get('structural_divergence_count')}, "
-                        f"tolerated drift={lg.get('value_drift_count')})"
+                        f"Reproduces chain (replay vs live): {reproduces} "
+                        f"(chain mismatches={cr.get('chain_mismatch_count')}, "
+                        f"tolerated drift={cr.get('tolerated_drift_count')})"
                     )
                     fs = state.get("failed_subcalls") or {}
                     click.echo(

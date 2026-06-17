@@ -81,6 +81,39 @@ pondereplay compare-patch \
 
 Expect classification `effective_patch` when the attack reverts under patch but succeeded under original.
 
+### State-effect comparison (behavioral preservation)
+
+Revert/success status alone is incomplete: a benign tx can still *succeed* under the
+patch while changing storage/logs/balances, and an attack can be *blocked in a sub-call*
+the attacker swallows while the top-level tx still returns success. Add `--compare-state`
+to compare the actual on-chain **state effect** of the patched vs. original replay:
+
+```bash
+pondereplay compare-patch \
+  --tx-hash 0xTX --contract-address 0xCONTRACT \
+  --bytecode-file ./patch.hex --original-bytecode-file ./original.hex \
+  --compare-state -v
+```
+
+This forces the Anvil tier (the fast `eth_call` tier produces no state diff), captures a
+`prestateTracer` diff for each replay, and:
+
+- runs the **reproduction check** (O vs live; `reproduces_chain`) — if the original replay
+  does not structurally reproduce the chain tx, the comparison is `inconclusive`;
+- runs the **preservation test** (O vs P; `state_equivalent`) on storage/logs/non-gas
+  balances, with gas-derived state normalized out and time/block-derived state
+  context-gated.
+
+New classification outcomes:
+
+| Outcome | Meaning |
+|---|---|
+| `needs_inspection` | Benign tx: both succeed, but the patch changed the state effect |
+| `effective_patch` (attack, sub-call) | Top-level still succeeds, but the exploit's state effect is gone |
+
+See [docs/state-comparison.md](docs/state-comparison.md) for the soundness design and the
+per-field tolerance classes (critical / normalized / context-gated / loose).
+
 ## Commands
 
 | Command | Purpose |

@@ -19,8 +19,8 @@ def _state_says_diverged(state: Optional[Dict[str, Any]]) -> Optional[bool]:
     - True  -> patched state differs from original (critical divergence)
     - False -> patched state matches original
 
-    The live-state diff is handled separately as the *structural* gate (see
-    ``_gate_failed_structural``); it is not part of this signal, because comparing the
+    The live-state diff is handled separately as the *structural* reproduction check (see
+    ``_chain_not_reproduced``); it is not part of this signal, because comparing the
     local fork against real chain induces benign value drift (interest accrual) that the
     same-context test cancels (see docs/state-comparison.md).
     """
@@ -32,17 +32,17 @@ def _state_says_diverged(state: Optional[Dict[str, Any]]) -> Optional[bool]:
     return not eq
 
 
-def _gate_failed_structural(state: Optional[Dict[str, Any]]) -> bool:
+def _chain_not_reproduced(state: Optional[Dict[str, Any]]) -> bool:
     """
-    True if the STRUCTURAL live gate fired (original replay diverged from live chain in
-    status / account-scope / code — i.e. did not reproduce reality). Value-level accrual
-    drift is tolerated by the gate, so this does not fire on benign drift.
+    True if the STRUCTURAL reproduction check failed (original replay diverged from live
+    chain in status / account-scope / code — i.e. did not reproduce reality). Value-level
+    accrual drift is tolerated, so this does not fire on benign drift.
 
     Load-bearing only where the verdict depends on the state comparison (the both-succeed
     branches); a clean top-level status flip is decided by status alone.
     """
     return bool(
-        state and state.get("available") and state.get("gate_faithful") is False
+        state and state.get("available") and state.get("reproduces_chain") is False
     )
 
 
@@ -74,8 +74,8 @@ def classify_patch_effect(
 
     ``state`` is the optional state-comparison result (see ``state_compare``): the
     same-context test (``state_equivalent``) decides whether the patch changed the state
-    effect, and the structural live gate (``gate_faithful``) decides whether the original
-    replay reproduced reality.
+    effect, and the structural reproduction check (``reproduces_chain``) decides whether
+    the original replay reproduced reality.
     """
 
     def _faithful_mode(mode: str) -> bool:
@@ -88,7 +88,7 @@ def classify_patch_effect(
             return "unfaithful_replay"
 
     diverged = _state_says_diverged(state)
-    gate_failed = _gate_failed_structural(state)
+    chain_not_reproduced = _chain_not_reproduced(state)
 
     if is_attack_tx:
         if chain_tx_succeeded and not original_replay.success:
@@ -107,11 +107,11 @@ def classify_patch_effect(
         if chain_tx_succeeded and original_replay.success and patched_replay.success:
             # Top-level status unchanged: only the same-context state test can tell
             # whether the exploit's effect was neutralized (e.g. a reverted sub-call the
-            # attacker swallowed). Here the structural gate is load-bearing: if the
+            # attacker swallowed). Here the reproduction check is load-bearing: if the
             # original replay didn't structurally reproduce live, we can't conclude.
             if diverged is True:
                 return "effective_patch"
-            if gate_failed:
+            if chain_not_reproduced:
                 return "inconclusive"
             return "ineffective_patch"
         if not chain_tx_succeeded:
@@ -119,7 +119,7 @@ def classify_patch_effect(
         return "inconclusive"
 
     # Benign tx: the patch should preserve the live behaviour. "preserved" requires the
-    # replay to reproduce chain (gate) AND the patch to change nothing (test). Any change
+    # replay to reproduce chain AND the patch to change nothing (test). Any change
     # the patch introduces — a different state effect, or breaking the tx by reverting —
     # is flagged for manual inspection (could be a mislabeled malicious tx).
     if not original_replay.success:
@@ -132,8 +132,8 @@ def classify_patch_effect(
             return "inconclusive"
         return "needs_inspection"  # patch broke a benign tx (now reverts)
     # Both succeed.
-    if gate_failed:
-        return "inconclusive"  # original replay not faithful to chain
+    if chain_not_reproduced:
+        return "inconclusive"  # original replay did not reproduce chain
     if diverged is True:
         return "needs_inspection"  # patch changed the state effect of a benign tx
     return "preserved"

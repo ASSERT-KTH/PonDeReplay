@@ -67,13 +67,13 @@ class TestClassifyPatchEffect:
         )
 
 
-def _state(available=True, equivalent=True, gate_faithful=True):
-    # ``state_equivalent`` = same-context test (patched vs original); ``gate_faithful`` =
-    # STRUCTURAL live gate (status/scope/code). gate_faithful=None means unavailable.
+def _state(available=True, equivalent=True, reproduces_chain=True):
+    # ``state_equivalent`` = same-context test (patched vs original); ``reproduces_chain``
+    # = STRUCTURAL reproduction check (status/scope/code). None means unavailable.
     return {
         "available": available,
         "state_equivalent": equivalent,
-        "gate_faithful": gate_faithful,
+        "reproduces_chain": reproduces_chain,
     }
 
 
@@ -106,29 +106,29 @@ class TestStateAxis:
             == "needs_inspection"
         )
 
-    def test_benign_structural_gate_failure_is_inconclusive(self):
-        # Both succeed, test equivalent, but the structural live gate failed -> the
-        # original replay didn't reproduce reality -> inconclusive.
+    def test_benign_chain_not_reproduced_is_inconclusive(self):
+        # Both succeed, test equivalent, but the structural reproduction check failed ->
+        # the original replay didn't reproduce reality -> inconclusive.
         o, p = _result(True), _result(True)
         assert (
             classify_patch_effect(
                 o,
                 p,
                 is_attack_tx=False,
-                state=_state(equivalent=True, gate_faithful=False),
+                state=_state(equivalent=True, reproduces_chain=False),
             )
             == "inconclusive"
         )
 
-    def test_benign_value_drift_gate_ok_is_preserved(self):
-        # Structural gate faithful (value drift tolerated) + test equivalent -> preserved.
+    def test_benign_value_drift_reproduces_chain_is_preserved(self):
+        # Reproduces chain (value drift tolerated) + test equivalent -> preserved.
         o, p = _result(True), _result(True)
         assert (
             classify_patch_effect(
                 o,
                 p,
                 is_attack_tx=False,
-                state=_state(equivalent=True, gate_faithful=True),
+                state=_state(equivalent=True, reproduces_chain=True),
             )
             == "preserved"
         )
@@ -195,8 +195,8 @@ class TestStateAxis:
             == "inconclusive"
         )
 
-    def test_attack_top_level_revert_effective_even_if_gate_failed(self):
-        # Clean status flip is decided by status alone; structural gate not consulted.
+    def test_attack_top_level_revert_effective_even_if_chain_not_reproduced(self):
+        # Clean status flip is decided by status alone; reproduction check not consulted.
         o = _result(True, mode="anvil_indexed")
         p = _result(False, mode="anvil_indexed")
         assert (
@@ -205,13 +205,13 @@ class TestStateAxis:
                 p,
                 chain_tx_succeeded=True,
                 is_attack_tx=True,
-                state=_state(equivalent=True, gate_faithful=False),
+                state=_state(equivalent=True, reproduces_chain=False),
             )
             == "effective_patch"
         )
 
-    def test_attack_both_succeed_structural_gate_failure_is_inconclusive(self):
-        # Both succeed, test equivalent (exploit lands), but structural gate failed ->
+    def test_attack_both_succeed_chain_not_reproduced_is_inconclusive(self):
+        # Both succeed, test equivalent (exploit lands), but reproduction check failed ->
         # original replay didn't reproduce reality -> inconclusive.
         o, p = _result(True), _result(True)
         assert (
@@ -220,7 +220,7 @@ class TestStateAxis:
                 p,
                 chain_tx_succeeded=True,
                 is_attack_tx=True,
-                state=_state(equivalent=True, gate_faithful=False),
+                state=_state(equivalent=True, reproduces_chain=False),
             )
             == "inconclusive"
         )

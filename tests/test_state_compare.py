@@ -11,7 +11,7 @@ from pondereplay.state_compare import (
     CONTEXT_INDUCED,
     VALUE_DRIFT,
     compare,
-    gate,
+    reproduction_check,
 )
 
 
@@ -278,8 +278,8 @@ class TestStructuralGate:
     def _cap(self, diff, **kw):
         return build_capture(prestate_diff=diff, sender=SENDER, coinbase=COINBASE, **kw)
 
-    def test_gate_tolerates_value_drift(self):
-        # Storage/log/balance differences are value_drift in the gate -> faithful.
+    def test_reproduction_check_tolerates_value_drift(self):
+        # Storage/log/balance differences are value_drift -> reproduces chain.
         a = {
             "pre": {TOKEN: {"storage": {SLOT: _word(5)}}},
             "post": {TOKEN: {"storage": {SLOT: _word(9)}}},
@@ -288,19 +288,19 @@ class TestStructuralGate:
             "pre": {TOKEN: {"storage": {SLOT: _word(5)}}},
             "post": {TOKEN: {"storage": {SLOT: _word(10)}}},  # accrual drift
         }
-        rep = gate(self._cap(a), self._cap(b))
+        rep = reproduction_check(self._cap(a), self._cap(b))
         assert rep.state_equivalent is True
         assert any(d.severity == VALUE_DRIFT for d in rep.divergences)
 
-    def test_gate_fails_on_status_mismatch(self):
-        rep = gate(
+    def test_reproduction_check_fails_on_status_mismatch(self):
+        rep = reproduction_check(
             build_capture(prestate_diff={}, status=1, sender=SENDER),
             build_capture(prestate_diff={}, status=0, sender=SENDER),
         )
         assert rep.state_equivalent is False
         assert any(d.category == "status" for d in rep.critical)
 
-    def test_gate_fails_on_account_scope(self):
+    def test_reproduction_check_fails_on_account_scope(self):
         # An extra contract touched in only one execution -> structural divergence.
         other = "0x4444444444444444444444444444444444444444"
         a = {
@@ -308,14 +308,14 @@ class TestStructuralGate:
             "post": {other: {"storage": {SLOT: _word(1)}}},
         }
         b = {"pre": {}, "post": {}}
-        rep = gate(self._cap(a), self._cap(b))
+        rep = reproduction_check(self._cap(a), self._cap(b))
         assert rep.state_equivalent is False
         assert any(d.category == "account_scope" for d in rep.critical)
 
-    def test_gate_fails_on_code_change(self):
+    def test_reproduction_check_fails_on_code_change(self):
         a = {"pre": {TOKEN: {"code": "0xabcd"}}, "post": {TOKEN: {"code": "0xbeef"}}}
         b = {"pre": {}, "post": {}}
-        rep = gate(self._cap(a), self._cap(b))
+        rep = reproduction_check(self._cap(a), self._cap(b))
         assert rep.state_equivalent is False
         # code change shows up (account_scope and/or code), both critical/structural
         assert any(d.category in ("code", "account_scope") for d in rep.critical)

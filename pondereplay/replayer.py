@@ -386,12 +386,13 @@ class TransactionReplayer:
     ) -> Dict[str, Any]:
         """
         Compare the patched replay's state effect against the original replay's, and
-        gate both against live chain. See docs/state-comparison.md.
+        check the original replay against live chain ("reproduces chain"). See
+        docs/state-comparison.md.
 
         Only available when both replays captured state (Anvil tier). The fast eth_call
         tier produces no state diff, so the comparison is reported as unavailable.
         """
-        from .state_compare import gate as state_gate, preservation_test
+        from .state_compare import reproduction_check, preservation_test
         from .state_diff import StateCapture, capture_tx
 
         orig_dict = (original_result.state_changes or {}).get("state_capture")
@@ -413,8 +414,8 @@ class TransactionReplayer:
 
         odiag = original_result.diagnostics or {}
         pdiag = patched_result.diagnostics or {}
-        # Gate compares original-replay vs live -> use original's context fidelity.
-        gate_context_faithful = _ctx_faithful(odiag)
+        # Reproduction check compares original-replay vs live -> original's context fidelity.
+        repro_context_faithful = _ctx_faithful(odiag)
         # Test compares the two replays -> faithful only if both are.
         test_context_faithful = _ctx_faithful(odiag) and _ctx_faithful(pdiag)
 
@@ -427,15 +428,17 @@ class TransactionReplayer:
         test = preservation_test(
             original_cap, patched_cap, context_faithful=test_context_faithful
         )
-        gate_report = (
-            state_gate(original_cap, live_cap, context_faithful=gate_context_faithful)
+        repro_report = (
+            reproduction_check(
+                original_cap, live_cap, context_faithful=repro_context_faithful
+            )
             if live_cap is not None
             else None
         )
 
         gas_bumped = bool(pdiag.get("gas_bumped_for_patch"))
         # ``state_equivalent`` (test: patched vs original, same fork context) is the
-        # decisive state signal. ``gate_faithful`` is the STRUCTURAL live gate (status /
+        # decisive state signal. ``reproduces_chain`` is the STRUCTURAL live check (status /
         # account-scope / code) — it tolerates value-level accrual drift and is
         # load-bearing only where the verdict depends on state (the both-succeed case).
         return {
@@ -443,8 +446,12 @@ class TransactionReplayer:
             "context_faithful": test_context_faithful,
             "state_equivalent": test.state_equivalent,
             "status_faithful": bool(original_result.success),
-            "gate_faithful": (
-                gate_report.state_equivalent if gate_report is not None else None
+            # Top-level execution status per run: 1 = success, 0 = reverted, None = unknown.
+            "live_status": live_cap.status if live_cap is not None else None,
+            "original_status": original_cap.status,
+            "patched_status": patched_cap.status,
+            "reproduces_chain": (
+                repro_report.state_equivalent if repro_report is not None else None
             ),
             "failed_subcalls": {
                 "original": original_cap.failed_subcalls,
@@ -453,20 +460,20 @@ class TransactionReplayer:
             },
             "gas_limit_potentially_confounded": gas_bumped,
             "test": test.to_dict(),
-            "live_gate": {
+            "chain_reproduction": {
                 "kind": "structural",
-                "available": gate_report is not None,
-                "context_faithful": gate_context_faithful,
+                "available": repro_report is not None,
+                "context_faithful": repro_context_faithful,
                 "state_equivalent": (
-                    gate_report.state_equivalent if gate_report is not None else None
+                    repro_report.state_equivalent if repro_report is not None else None
                 ),
-                "structural_divergence_count": (
-                    len(gate_report.critical) if gate_report is not None else None
+                "chain_mismatch_count": (
+                    len(repro_report.critical) if repro_report is not None else None
                 ),
-                "value_drift_count": (
-                    len(gate_report.value_drift) if gate_report is not None else None
+                "tolerated_drift_count": (
+                    len(repro_report.value_drift) if repro_report is not None else None
                 ),
-                "report": gate_report.to_dict() if gate_report is not None else None,
+                "report": repro_report.to_dict() if repro_report is not None else None,
             },
             "captures": {
                 "original": orig_dict,

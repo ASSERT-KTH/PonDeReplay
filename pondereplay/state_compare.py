@@ -2,7 +2,8 @@
 Compare two state captures for behavioral equivalence.
 
 Used in two places (same engine, see ``docs/state-comparison.md``):
-- **gate**: original-replay vs live chain — is the harness faithful for this tx?
+- **reproduction check**: original-replay vs live chain — did the replay reproduce the
+  real on-chain tx? (reported as "reproduces chain")
 - **test**: patched-replay vs original-replay — does the patch change behavior?
 
 The verdict polarity (benign wants equivalence, attack wants the exploit effect gone)
@@ -20,7 +21,7 @@ from .state_diff import AccountDiff, StateCapture
 # Severity: only ``critical`` flips equivalence. The others are recorded for inspection.
 CRITICAL = "critical"
 CONTEXT_INDUCED = "context_induced"  # would be critical but context is unfaithful
-VALUE_DRIFT = "value_drift"  # value-level diff tolerated in the cross-context live gate
+VALUE_DRIFT = "value_drift"  # value-level diff tolerated in the cross-context reproduction check
 LOOSE = "loose"  # informational only (gas, coinbase, sender nonce)
 
 
@@ -77,18 +78,18 @@ class ComparisonReport:
         }
 
 
-def _value_severity(gate_mode: bool, context_faithful: bool) -> str:
+def _value_severity(structural_only: bool, context_faithful: bool) -> str:
     """
     Severity for value-level fields (storage, logs, balances, return data).
 
     - Same-context **test**: critical (context-gated for time/block-derived storage and
       logs). Drift cancels between two replays in one fork, so any remaining diff is real.
-    - Cross-context **gate** (replay vs live): downgraded to ``value_drift``. Interest
-      accrual over the replayed prior-tx sequence and the amounts derived from it differ
-      by tiny amounts that the test cancels but the live comparison cannot. Only
-      *structural* divergence (status / account-scope / code) is critical in the gate.
+    - Cross-context **reproduction check** (replay vs live): downgraded to ``value_drift``.
+      Interest accrual over the replayed prior-tx sequence and the amounts derived from it
+      differ by tiny amounts that the test cancels but the live comparison cannot. Only
+      *structural* divergence (status / account-scope / code) is critical here.
     """
-    if gate_mode:
+    if structural_only:
         return VALUE_DRIFT
     return CRITICAL if context_faithful else CONTEXT_INDUCED
 
@@ -117,7 +118,7 @@ def compare(
     b: StateCapture,
     *,
     context_faithful: bool = True,
-    gate_mode: bool = False,
+    structural_only: bool = False,
     label_a: str = "a",
     label_b: str = "b",
 ) -> ComparisonReport:
@@ -126,15 +127,16 @@ def compare(
 
     Both captures must come from runs that fork the same block N-1.
 
-    ``gate_mode`` switches to the **structural** comparison used for the cross-context
-    live gate: value-level fields (storage/logs/balances/return data) are downgraded to
-    ``value_drift`` (non-fatal), so only *structural* divergence — status mismatch,
-    account-scope (a contract touched in only one execution), code create/destruct, and
-    CREATE-nonce — flips ``state_equivalent``. The same-context test (``gate_mode=False``)
-    keeps value fields critical.
+    ``structural_only`` switches to the **structural** comparison used for the
+    cross-context reproduction check (original-replay vs live): value-level fields
+    (storage/logs/balances/return data) are downgraded to ``value_drift`` (non-fatal), so
+    only *structural* divergence — status mismatch, account-scope (a contract touched in
+    only one execution), code create/destruct, and CREATE-nonce — flips
+    ``state_equivalent``. The same-context test (``structural_only=False``) keeps value
+    fields critical.
     """
     divergences: List[Divergence] = []
-    value_sev = _value_severity(gate_mode, context_faithful)
+    value_sev = _value_severity(structural_only, context_faithful)
 
     # --- status (structural, critical) ---
     if a.status is not None and b.status is not None and a.status != b.status:
@@ -250,21 +252,22 @@ def compare(
     )
 
 
-def gate(
+def reproduction_check(
     original: StateCapture,
     live: StateCapture,
     *,
     context_faithful: bool = True,
 ) -> ComparisonReport:
     """
-    Structural validity gate: did the original replay reproduce live chain *structurally*
-    (status, account-scope, code), tolerating value-level drift (accrual)?
+    Did the original replay reproduce the live on-chain tx *structurally* (status,
+    account-scope, code), tolerating value-level drift (accrual)? Reported to users as
+    "reproduces chain". When this fails, the patch verdict is ``inconclusive``.
     """
     return compare(
         original,
         live,
         context_faithful=context_faithful,
-        gate_mode=True,
+        structural_only=True,
         label_a="original_replay",
         label_b="live",
     )
