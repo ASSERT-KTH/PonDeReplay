@@ -4,9 +4,9 @@ Sanity-check sweep before the full dfhl-invariants rerun.
 
 Runs the *improved* state-comparison replay (TransactionReplayer(compare_state=True),
 patched-vs-original behavioural equivalence) over every dfhl case, using:
-  - up to 5 RANDOMLY sampled benign txs per case (when available), drawn from the
-    case's existing dfhl-invariants/replay/<case>/analysis.json (non-malicious,
-    non-reverted, mined before the attack block), and
+  - up to N RANDOMLY sampled benign txs per case (when available), drawn from the
+    case's meaningful pre-attack tx pool in dfhl-invariants/src/<case>/txs/*.json
+    (collected by get_txs.py; excludes the malicious tx), and
   - the malicious tx.
 
 Outputs, written under <out-dir> (default: sanitycheck/):
@@ -30,12 +30,15 @@ import argparse
 import json
 import os
 import random
+import shutil
 import sys
 import time
 import traceback
 from pathlib import Path
 
 from web3 import Web3
+
+from dotenv import load_dotenv
 
 from pondereplay import TransactionReplayer
 
@@ -44,6 +47,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import run_state_report as rsr  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
+load_dotenv(dotenv_path=REPO / ".env", override=False)
 DEFAULT_DFHL_ROOT = Path("/home/sofia/Documents/Deffensive/dfhl-invariants")
 DEFAULT_OUT_DIR = REPO / "sanitycheck"
 DEFAULT_SEED = 42
@@ -53,9 +57,134 @@ DEFAULT_SEED = 42
 DEFAULT_STRICT_CASES: set[str] = set()
 
 
-def _eligible_benign(analysis: dict) -> list[str]:
-    """Benign pool = non-malicious, non-reverted txs mined strictly before the attack block."""
-    mal = (analysis.get("malicious_tx") or "").lower()
+def _eligible_cases_from_src(dfhl_root: Path) -> list[str]:
+    """Cases under dfhl ``src/`` with bytecode and a replay ``analysis.json``."""
+    src_dir = dfhl_root / "src"
+    replay_dir = dfhl_root / "replay"
+    cases: list[str] = []
+    for d in sorted(src_dir.iterdir()):
+        if not d.is_dir():
+            continue
+        case = d.name
+        bdir = d / "bytecode"
+        if not (bdir / "patch.hex").is_file() or not (bdir / "original.hex").is_file():
+            continue
+        if not (replay_dir / case / "analysis.json").is_file():
+            continue
+        cases.append(case)
+    return cases
+
+
+def _aggregate_row(
+    case: str,
+    *,
+    contract: str | None,
+    attack_tx: str | None,
+    results: list[dict],
+) -> dict:
+    benign_recs = [r for r in results if r.get("kind") == "benign"]
+    attack_rec = next((r for r in results if r.get("kind") == "attack"), None)
+
+    def _cls(r):
+        if not r or r.get("error"):
+            return None
+        return (r.get("summary") or {}).get("classification")
+
+    benign_changed = sum(1 for r in benign_recs if _cls(r) == "needs_inspection")
+    benign_preserved = sum(1 for r in benign_recs if _cls(r) == "preserved")
+    inconclusive = sum(
+        1 for r in results if _cls(r) in ("inconclusive", "unfaithful_replay")
+    )
+    errors = sum(1 for r in results if r.get("error"))
+    attack_cls = _cls(attack_rec)
+    attack_summary = (attack_rec.get("summary") if attack_rec else {}) or {}
+
+    return {
+        "case": case,
+        "contract": contract,
+        "attack_tx": attack_tx,
+        "tx_count": len(results),
+        "benign_count": len(benign_recs),
+        "benign_preserved": benign_preserved,
+        "benign_changed": benign_changed,
+        "inconclusive": inconclusive,
+        "errors": errors,
+        "attack_classification": attack_cls,
+        "attack_verdict": _attack_verdict(attack_cls) if attack_rec else "ERROR",
+        "attack_error": attack_rec.get("error") if attack_rec else "no attack tx",
+        "attack_summary": attack_summary,
+    }
+
+
+def _row_from_existing(case: str, out_dir: Path) -> dict | None:
+    path = out_dir / case / "report.json"
+    if not path.is_file():
+        return None
+    data = json.load(open(path))
+    meta = data.get("meta") or {}
+    return _aggregate_row(
+        case,
+        contract=meta.get("contract"),
+        attack_tx=meta.get("attack_tx"),
+        results=data.get("results") or [],
+    )
+
+
+def _is_tx_hash(h: str | None) -> bool:
+    if not h:
+        return False
+    h = h.strip().lower()
+    if not h.startswith("0x"):
+        h = "0x" + h
+    return len(h) == 66 and all(c in "0123456789abcdef" for c in h[2:])
+
+
+def _malicious_tx(dfhl_root: Path, case: str) -> str:
+    analysis_path = dfhl_root / "replay" / case / "analysis.json"
+    if not analysis_path.is_file():
+        return ""
+    return (json.load(open(analysis_path)).get("malicious_tx") or "").lower()
+
+
+def _eligible_benign_from_txs(dfhl_root: Path, case: str) -> list[str]:
+    """Benign pool = meaningful pre-attack txs from src/<case>/txs/*.json (excl. malicious).
+
+    Matches the "Meaningful txs" column in dfhl-invariants/README.md (get_txs.py output).
+    Falls back to replay/analysis.json tx_results when src/<case>/txs/ is missing/empty.
+    """
+    mal = _malicious_tx(dfhl_root, case)
+    txs_dir = dfhl_root / "src" / case / "txs"
+    if txs_dir.is_dir():
+        seen: set[str] = set()
+        ordered: list[str] = []
+        for path in sorted(txs_dir.glob("*.json")):
+            try:
+                data = json.load(open(path))
+            except Exception:
+                continue
+            if not isinstance(data, list):
+                continue
+            for entry in data:
+                if not isinstance(entry, dict):
+                    continue
+                tx_hash = entry.get("tx_hash")
+                if not _is_tx_hash(tx_hash):
+                    continue
+                key = tx_hash.lower()
+                if mal and key == mal:
+                    continue
+                if key in seen:
+                    continue
+                seen.add(key)
+                ordered.append(tx_hash)
+        if ordered:
+            return ordered
+
+    # Fallback: small replay subset in analysis.json (legacy v1 behaviour).
+    analysis_path = dfhl_root / "replay" / case / "analysis.json"
+    if not analysis_path.is_file():
+        return []
+    analysis = json.load(open(analysis_path))
     trs = analysis.get("tx_results", []) or []
     attack_block = next(
         (t.get("block_number") for t in trs if t["tx_hash"].lower() == mal), None
@@ -68,6 +197,29 @@ def _eligible_benign(analysis: dict) -> list[str]:
             continue
         pool.append(t["tx_hash"])
     return pool
+
+
+def _benign_pool_size(dfhl_root: Path, case: str) -> int:
+    return len(_eligible_benign_from_txs(dfhl_root, case))
+
+
+def _copy_case_report(case: str, *, src_dir: Path, dst_dir: Path) -> dict | None:
+    """Copy per-case report from a prior sweep; return aggregate row."""
+    src_case = src_dir / case
+    dst_case = dst_dir / case
+    src_json = src_case / "report.json"
+    if not src_json.is_file():
+        return None
+    dst_case.mkdir(parents=True, exist_ok=True)
+    for name in ("report.json", "report.md"):
+        src = src_case / name
+        if src.is_file():
+            shutil.copy2(src, dst_case / name)
+    row = _row_from_existing(case, dst_dir)
+    if row is not None:
+        row["source"] = "copied"
+        row["copied_from"] = str(src_dir)
+    return row
 
 
 def _attack_verdict(classification: str | None) -> str:
@@ -99,7 +251,7 @@ def run_case(
     patched_bc = rsr._read_hex(bdir / "patch.hex")
     original_bc = rsr._read_hex(bdir / "original.hex")
 
-    pool = _eligible_benign(analysis)
+    pool = _eligible_benign_from_txs(dfhl_root, case)
     take = min(num_benign, len(pool))
     benign = rng.sample(pool, take) if take else []
 
@@ -166,39 +318,12 @@ def run_case(
         # Write incrementally so a crash mid-case still leaves a partial report.
         rsr.write_outputs(results, meta, case_dir / "report.json", case_dir / "report.md")
 
-    # ---- build aggregate row ----
-    benign_recs = [r for r in results if r.get("kind") == "benign"]
-    attack_rec = next((r for r in results if r.get("kind") == "attack"), None)
-
-    def _cls(r):
-        if not r or r.get("error"):
-            return None
-        return (r.get("summary") or {}).get("classification")
-
-    benign_changed = sum(1 for r in benign_recs if _cls(r) == "needs_inspection")
-    benign_preserved = sum(1 for r in benign_recs if _cls(r) == "preserved")
-    inconclusive = sum(
-        1 for r in results if _cls(r) in ("inconclusive", "unfaithful_replay")
+    return _aggregate_row(
+        case,
+        contract=contract,
+        attack_tx=attack_tx,
+        results=results,
     )
-    errors = sum(1 for r in results if r.get("error"))
-    attack_cls = _cls(attack_rec)
-    attack_summary = (attack_rec.get("summary") if attack_rec else {}) or {}
-
-    return {
-        "case": case,
-        "contract": contract,
-        "attack_tx": attack_tx,
-        "tx_count": len(results),
-        "benign_count": len(benign_recs),
-        "benign_preserved": benign_preserved,
-        "benign_changed": benign_changed,
-        "inconclusive": inconclusive,
-        "errors": errors,
-        "attack_classification": attack_cls,
-        "attack_verdict": _attack_verdict(attack_cls) if attack_rec else "ERROR",
-        "attack_error": attack_rec.get("error") if attack_rec else "no attack tx",
-        "attack_summary": attack_summary,
-    }
 
 
 def _write_summary(rows: list[dict], out_dir: Path, meta: dict) -> None:
@@ -226,10 +351,19 @@ def _write_summary(rows: list[dict], out_dir: Path, meta: dict) -> None:
     L: list[str] = [
         "# PonDeReplay dfhl sanity check — state-comparison sweep\n",
         f"- Generated: {meta['generated']}",
+        f"- Case source: {meta.get('case_source', 'dfhl analysis.json')}",
         f"- Benign source: random sample (seed {meta['seed']}) of up to "
-        f"{meta['num_benign']} benign txs per case from dfhl analysis.json + the malicious tx",
+        f"{meta['num_benign']} meaningful benign txs per case from "
+        f"dfhl src/<case>/txs/*.json + the malicious tx",
+    ]
+    if meta.get("copy_if_pool_below") is not None:
+        L.append(
+            f"- Cases with fewer than {meta['copy_if_pool_below']} eligible benign txs "
+            f"copied from `{meta.get('copy_from_dir')}`"
+        )
+    L.extend([
         "- Engine: `TransactionReplayer(compare_state=True)` — patched-vs-original "
-        "behavioural equivalence (see docs/state-comparison.md)\n",
+        "behavioural equivalence (see docs/tx-replay-comparison.md)\n",
         f"- Cases analyzed: {len(rows)}",
         f"- Transactions: {total_tx}",
         f"- Attack blocked (effective_patch): {blocked}",
@@ -239,6 +373,11 @@ def _write_summary(rows: list[dict], out_dir: Path, meta: dict) -> None:
         f"- Benign changed (needs_inspection — patch altered a benign tx): {benign_changed}",
         f"- Inconclusive txs (replay didn't reproduce chain): {inconclusive}",
         f"- Errored txs: {errors}\n",
+    ])
+    if meta.get("finished_at"):
+        L.append(f"- Finished: {meta['finished_at']}")
+        L.append(f"- Elapsed: {meta.get('elapsed_sec')}s\n")
+    L.extend([
         "## Legend\n",
         "- **Attack verdict**: `✓ blocked` = `effective_patch` (exploit neutralized), "
         "`✗ NOT blocked` = `ineffective_patch` (exploit still lands), "
@@ -250,7 +389,7 @@ def _write_summary(rows: list[dict], out_dir: Path, meta: dict) -> None:
         "## Per-case overview\n",
         "| Case | Txs | Benign | Attack verdict | ❌ Benign changed | 🔍 Inconclusive |",
         "|------|-----|--------|----------------|-------------------|-----------------|",
-    ]
+    ])
     for r in rows:
         L.append(
             f"| {r['case']} | {r['tx_count']} | {r['benign_count']} "
@@ -278,7 +417,8 @@ def _write_summary(rows: list[dict], out_dir: Path, meta: dict) -> None:
             L.append(
                 f"- reproduces chain (replay vs live): **{rc}** "
                 f"(chain mismatches={s.get('chain_mismatches')}, "
-                f"tolerated drift={s.get('tolerated_drift')})"
+                f"tolerated drift={s.get('tolerated_drift')}, "
+                f"max relative drift={s.get('max_relative_drift')})"
             )
             if s.get("patched_error"):
                 L.append(f"- patched error: `{s['patched_error']}`")
@@ -303,7 +443,15 @@ def main() -> int:
                     help="Case ids to replay with strict Anvil context (timestamp-sensitive).")
     ap.add_argument("--skip-existing", action="store_true",
                     help="Skip cases that already have <out-dir>/<case>/report.json.")
+    ap.add_argument("--copy-if-pool-below", type=int, default=None,
+                    help="If benign pool size is below this threshold, copy the case "
+                    "report from --copy-from-dir instead of replaying.")
+    ap.add_argument("--copy-from-dir", type=Path, default=None,
+                    help="Source directory for --copy-if-pool-below (e.g. sanitycheck/).")
     args = ap.parse_args()
+
+    if args.copy_if_pool_below is not None and args.copy_from_dir is None:
+        ap.error("--copy-from-dir is required when --copy-if-pool-below is set")
 
     rpc = os.environ.get("ETH_RPC_URL")
     if not rpc:
@@ -312,28 +460,68 @@ def main() -> int:
     w3 = Web3(Web3.HTTPProvider(rpc))
 
     replay_dir = args.dfhl_root / "replay"
-    all_cases = sorted(d.name for d in replay_dir.glob("*/") if (d / "analysis.json").exists())
+    all_cases = _eligible_cases_from_src(args.dfhl_root)
     cases = args.cases if args.cases else all_cases
     missing = [c for c in cases if c not in all_cases]
     if missing:
-        ap.error("Unknown/ineligible cases (no analysis.json): " + ", ".join(missing))
+        ap.error(
+            "Unknown/ineligible cases (need src/<case>/bytecode + replay analysis.json): "
+            + ", ".join(missing)
+        )
 
     strict_cases = set(args.strict_cases) if args.strict_cases else DEFAULT_STRICT_CASES
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
+    started_at = time.strftime("%Y-%m-%d %H:%M:%S")
+    t0 = time.time()
     meta = {
-        "generated": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "generated": started_at,
+        "started_at": started_at,
         "dfhl_root": str(args.dfhl_root),
+        "case_source": "dfhl-invariants/src (with replay/analysis.json)",
+        "benign_source": "dfhl-invariants/src/<case>/txs/*.json (meaningful pre-attack pool)",
         "num_benign": args.num_benign,
         "seed": args.seed,
         "cases_requested": cases,
+        "cases_eligible": all_cases,
         "strict_cases": sorted(strict_cases),
+        "copy_if_pool_below": args.copy_if_pool_below,
+        "copy_from_dir": str(args.copy_from_dir) if args.copy_from_dir else None,
     }
 
     rows: list[dict] = []
     for case in cases:
         if args.skip_existing and (args.out_dir / case / "report.json").exists():
             print(f"=== {case} === skip (report.json exists)", flush=True)
+            row = _row_from_existing(case, args.out_dir)
+            if row:
+                rows.append(row)
+                _write_summary(rows, args.out_dir, meta)
+            continue
+        pool_size = _benign_pool_size(args.dfhl_root, case)
+        if (
+            args.copy_if_pool_below is not None
+            and pool_size < args.copy_if_pool_below
+            and args.copy_from_dir is not None
+        ):
+            print(
+                f"=== {case} === copy (pool={pool_size} < {args.copy_if_pool_below}) "
+                f"from {args.copy_from_dir}",
+                flush=True,
+            )
+            row = _copy_case_report(case, src_dir=args.copy_from_dir, dst_dir=args.out_dir)
+            if row is None:
+                print(f"  -> COPY ERROR: no report in {args.copy_from_dir / case}", flush=True)
+                row = {
+                    "case": case, "contract": None, "attack_tx": None, "tx_count": 0,
+                    "benign_count": 0, "benign_preserved": 0, "benign_changed": 0,
+                    "inconclusive": 0, "errors": 1, "attack_classification": None,
+                    "attack_verdict": "ERROR",
+                    "attack_error": f"missing copy source in {args.copy_from_dir}",
+                    "attack_summary": {},
+                }
+            rows.append(row)
+            _write_summary(rows, args.out_dir, meta)
             continue
         # Per-case rng so a fixed --cases subset reproduces regardless of order.
         rng = random.Random(f"{args.seed}:{case}")
@@ -353,6 +541,10 @@ def main() -> int:
             }
         rows.append(row)
         _write_summary(rows, args.out_dir, meta)  # incremental aggregate
+
+    meta["finished_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    meta["elapsed_sec"] = round(time.time() - t0, 1)
+    _write_summary(rows, args.out_dir, meta)
 
     print(f"\nDone. Wrote {args.out_dir}/summary.md (+ summary.json) and per-case reports.", flush=True)
     return 0

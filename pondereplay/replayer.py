@@ -387,7 +387,7 @@ class TransactionReplayer:
         """
         Compare the patched replay's state effect against the original replay's, and
         check the original replay against live chain ("reproduces chain"). See
-        docs/state-comparison.md.
+        docs/tx-replay-comparison.md.
 
         Only available when both replays captured state (Anvil tier). The fast eth_call
         tier produces no state diff, so the comparison is reported as unavailable.
@@ -425,8 +425,14 @@ class TransactionReplayer:
         except Exception:
             live_cap = None
 
+        # The patched run may need a higher gas limit; when bumped, the sender's
+        # gas-normalized balance residue no longer cancels in the O->P test.
+        gas_bumped = bool(pdiag.get("gas_bumped_for_patch"))
         test = preservation_test(
-            original_cap, patched_cap, context_faithful=test_context_faithful
+            original_cap,
+            patched_cap,
+            context_faithful=test_context_faithful,
+            gas_confounded=gas_bumped,
         )
         repro_report = (
             reproduction_check(
@@ -436,32 +442,64 @@ class TransactionReplayer:
             else None
         )
 
-        gas_bumped = bool(pdiag.get("gas_bumped_for_patch"))
         # ``state_equivalent`` (test: patched vs original, same fork context) is the
-        # decisive state signal. ``reproduces_chain`` is the STRUCTURAL live check (status /
-        # account-scope / code) — it tolerates value-level accrual drift and is
-        # load-bearing only where the verdict depends on state (the both-succeed case).
+        # decisive state signal. ``reproduces_chain`` is the calibrated reproduction check
+        # (structural + bounded numeric storage drift) — load-bearing only where the
+        # verdict depends on state (the both-succeed case).
+        failed_subcalls = {
+            "original": original_cap.failed_subcalls,
+            "patched": patched_cap.failed_subcalls,
+            "live": live_cap.failed_subcalls if live_cap is not None else None,
+        }
+        repro_subcalls_match = (
+            None
+            if live_cap is None
+            else original_cap.failed_subcalls == live_cap.failed_subcalls
+            if original_cap.failed_subcalls is not None
+            and live_cap.failed_subcalls is not None
+            else None
+        )
+        test_subcalls_match = (
+            original_cap.failed_subcalls == patched_cap.failed_subcalls
+            if original_cap.failed_subcalls is not None
+            and patched_cap.failed_subcalls is not None
+            else None
+        )
+        # When the on-chain tx reverted but the gas-bumped original replay succeeds,
+        # the revert was gas/OOG-induced (more gas → it completes), not a logic revert.
+        # Both runs keep the gas bump (so the patched-vs-original test stays valid); we
+        # flag it so the reproduction "failure" reads as an expected OOG artifact rather
+        # than a behavioral divergence, and so revert-preservation can be read off the
+        # patched status with that caveat in mind.
+        live_status = live_cap.status if live_cap is not None else None
+        orig_gas_bumped = bool(odiag.get("gas_bumped_for_patch"))
+        onchain_revert_gas_induced = bool(
+            live_status == 0 and original_cap.status == 1 and orig_gas_bumped
+        )
         return {
             "available": True,
             "context_faithful": test_context_faithful,
             "state_equivalent": test.state_equivalent,
             "status_faithful": bool(original_result.success),
             # Top-level execution status per run: 1 = success, 0 = reverted, None = unknown.
-            "live_status": live_cap.status if live_cap is not None else None,
+            "live_status": live_status,
             "original_status": original_cap.status,
             "patched_status": patched_cap.status,
+            # On-chain reverted but the (gas-bumped) replay completes -> revert was
+            # gas/OOG-induced, not behavioral. See note above.
+            "onchain_revert_gas_induced": onchain_revert_gas_induced,
             "reproduces_chain": (
                 repro_report.state_equivalent if repro_report is not None else None
             ),
-            "failed_subcalls": {
-                "original": original_cap.failed_subcalls,
-                "patched": patched_cap.failed_subcalls,
-                "live": live_cap.failed_subcalls if live_cap is not None else None,
+            "failed_subcalls": failed_subcalls,
+            "failed_subcalls_match": {
+                "reproduction_check": repro_subcalls_match,
+                "preservation_test": test_subcalls_match,
             },
             "gas_limit_potentially_confounded": gas_bumped,
             "test": test.to_dict(),
             "chain_reproduction": {
-                "kind": "structural",
+                "kind": "calibrated",
                 "available": repro_report is not None,
                 "context_faithful": repro_context_faithful,
                 "state_equivalent": (
@@ -472,6 +510,12 @@ class TransactionReplayer:
                 ),
                 "tolerated_drift_count": (
                     len(repro_report.value_drift) if repro_report is not None else None
+                ),
+                "max_relative_drift": (
+                    repro_report.max_relative_drift if repro_report is not None else None
+                ),
+                "loose_count": (
+                    len(repro_report.loose) if repro_report is not None else None
                 ),
                 "report": repro_report.to_dict() if repro_report is not None else None,
             },

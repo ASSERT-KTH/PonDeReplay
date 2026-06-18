@@ -224,3 +224,49 @@ class TestStateAxis:
             )
             == "inconclusive"
         )
+
+    def test_benign_state_available_but_reproduction_unverified_is_inconclusive(self):
+        # Anvil captured O and P (state available) but the live capture failed, so the
+        # reproduction check could not run (reproduces_chain=None). We must NOT emit
+        # "preserved" off a reproduction we never validated -> inconclusive.
+        o, p = _result(True), _result(True)
+        assert (
+            classify_patch_effect(
+                o,
+                p,
+                is_attack_tx=False,
+                state=_state(equivalent=True, reproduces_chain=None),
+            )
+            == "inconclusive"
+        )
+
+    def test_attack_state_available_but_reproduction_unverified_is_inconclusive(self):
+        # Same gap on the attack side: both succeed, exploit appears to land, but with no
+        # live capture we cannot claim the exploit "still lands" -> inconclusive, not
+        # ineffective_patch.
+        o, p = _result(True), _result(True)
+        assert (
+            classify_patch_effect(
+                o,
+                p,
+                chain_tx_succeeded=True,
+                is_attack_tx=True,
+                state=_state(equivalent=True, reproduces_chain=None),
+            )
+            == "inconclusive"
+        )
+
+    def test_benign_diverged_with_unverified_reproduction_still_needs_inspection(self):
+        # A same-context state change is attributable to the patch regardless of the
+        # reproduction check, so it stays needs_inspection even when reproduction is
+        # unverified (the reproduction gate only governs the "nothing changed" verdicts).
+        o, p = _result(True), _result(True)
+        assert (
+            classify_patch_effect(
+                o,
+                p,
+                is_attack_tx=False,
+                state=_state(equivalent=False, reproduces_chain=None),
+            )
+            == "needs_inspection"
+        )

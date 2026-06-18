@@ -22,7 +22,7 @@ def _state_says_diverged(state: Optional[Dict[str, Any]]) -> Optional[bool]:
     The live-state diff is handled separately as the *structural* reproduction check (see
     ``_chain_not_reproduced``); it is not part of this signal, because comparing the
     local fork against real chain induces benign value drift (interest accrual) that the
-    same-context test cancels (see docs/state-comparison.md).
+    same-context test cancels (see docs/tx-replay-comparison.md).
     """
     if not state or not state.get("available"):
         return None
@@ -34,16 +34,23 @@ def _state_says_diverged(state: Optional[Dict[str, Any]]) -> Optional[bool]:
 
 def _chain_not_reproduced(state: Optional[Dict[str, Any]]) -> bool:
     """
-    True if the STRUCTURAL reproduction check failed (original replay diverged from live
-    chain in status / account-scope / code — i.e. did not reproduce reality). Value-level
-    accrual drift is tolerated, so this does not fire on benign drift.
+    True if the reproduction check did NOT affirmatively confirm that the original replay
+    reproduced live chain. Fires when state comparison is available but ``reproduces_chain``
+    is not ``True`` — i.e. a calibrated/structural divergence (``reproduces_chain == False``)
+    OR the live capture was unavailable so reproduction could not be verified
+    (``reproduces_chain is None``). Treating the unverified case as "reproduced" would let a
+    missing live tracer silently pass off ``preserved`` / ``ineffective_patch`` verdicts that
+    the comparison never validated.
+
+    Does NOT fire when state comparison is entirely unavailable (the fast ``eth_call`` tier
+    produces no state diff): those runs fall back to status-only classification.
 
     Load-bearing only where the verdict depends on the state comparison (the both-succeed
     branches); a clean top-level status flip is decided by status alone.
     """
-    return bool(
-        state and state.get("available") and state.get("reproduces_chain") is False
-    )
+    if not state or not state.get("available"):
+        return False
+    return state.get("reproduces_chain") is not True
 
 
 def classify_patch_effect(
@@ -74,8 +81,10 @@ def classify_patch_effect(
 
     ``state`` is the optional state-comparison result (see ``state_compare``): the
     same-context test (``state_equivalent``) decides whether the patch changed the state
-    effect, and the structural reproduction check (``reproduces_chain``) decides whether
-    the original replay reproduced reality.
+    effect, and the calibrated reproduction check (``reproduces_chain``) decides whether
+    the original replay reproduced reality. When state is available but reproduction was
+    not affirmatively confirmed (check failed, or live capture missing), the state-decided
+    verdicts collapse to ``inconclusive``.
     """
 
     def _faithful_mode(mode: str) -> bool:
@@ -108,7 +117,8 @@ def classify_patch_effect(
             # Top-level status unchanged: only the same-context state test can tell
             # whether the exploit's effect was neutralized (e.g. a reverted sub-call the
             # attacker swallowed). Here the reproduction check is load-bearing: if the
-            # original replay didn't structurally reproduce live, we can't conclude.
+            # original replay didn't reproduce live (or we couldn't verify it), we can't
+            # conclude the exploit "still lands".
             if diverged is True:
                 return "effective_patch"
             if chain_not_reproduced:
@@ -131,11 +141,13 @@ def classify_patch_effect(
         if patch_diag.get("trace_out_of_gas_on_impl"):
             return "inconclusive"
         return "needs_inspection"  # patch broke a benign tx (now reverts)
-    # Both succeed.
-    if chain_not_reproduced:
-        return "inconclusive"  # original replay did not reproduce chain
+    # Both succeed. A same-context state change is attributable to the patch regardless of
+    # whether the replay reproduced chain (mirrors the attack branch's diverged-first
+    # check); the reproduction gate only governs the "nothing changed" verdict.
     if diverged is True:
         return "needs_inspection"  # patch changed the state effect of a benign tx
+    if chain_not_reproduced:
+        return "inconclusive"  # reproduction not confirmed -> can't call it "preserved"
     return "preserved"
 
 

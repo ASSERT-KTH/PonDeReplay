@@ -111,8 +111,10 @@ New classification outcomes:
 | `needs_inspection` | Benign tx: both succeed, but the patch changed the state effect |
 | `effective_patch` (attack, sub-call) | Top-level still succeeds, but the exploit's state effect is gone |
 
-See [docs/state-comparison.md](docs/state-comparison.md) for the soundness design and the
-per-field tolerance classes (critical / normalized / context-gated / loose).
+See [docs/architecture.md](docs/architecture.md) for the architectural overview (how
+replays are done, how/what we compare, with diagrams), and
+[docs/tx-replay-comparison.md](docs/tx-replay-comparison.md) for the full comparison
+design — state effects, drift tolerance, verdicts, and `block.timestamp` handling.
 
 ## Commands
 
@@ -152,7 +154,7 @@ Useful flags:
 | `--bump-gas-for-patch` | Re-estimate gas on Anvil ( **default on** when patch bytecode is provided; use `--no-bump-gas-for-patch` to disable) |
 | `--auto-strict-on-mismatch` | Escalate when fast replay disagrees with chain (default: on) |
 
-See [docs/timestamp-dependence.md](docs/timestamp-dependence.md) for why `block.timestamp` matters and how strict Anvil mitigates it.
+Timestamp-sensitive replays are covered in [docs/tx-replay-comparison.md](docs/tx-replay-comparison.md) §6.
 
 ## History replay
 

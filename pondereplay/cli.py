@@ -829,7 +829,7 @@ def trace_analyze(
     "--compare-state",
     is_flag=True,
     help="Compare on-chain state effects (storage/logs/balances), not just revert status. "
-    "Forces the Anvil tier and checks the replay against live chain (see docs/state-comparison.md)",
+    "Forces the Anvil tier and checks the replay against live chain (see docs/tx-replay-comparison.md)",
 )
 @click.option(
     "--output",
@@ -913,7 +913,8 @@ def compare_patch(
                     click.echo(
                         f"Reproduces chain (replay vs live): {reproduces} "
                         f"(chain mismatches={cr.get('chain_mismatch_count')}, "
-                        f"tolerated drift={cr.get('tolerated_drift_count')})"
+                        f"tolerated drift={cr.get('tolerated_drift_count')}, "
+                        f"max relative drift={cr.get('max_relative_drift')})"
                     )
                     fs = state.get("failed_subcalls") or {}
                     click.echo(

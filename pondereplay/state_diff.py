@@ -4,7 +4,7 @@ Canonical representation of a transaction's state effect.
 Parses a ``prestateTracer`` (``diffMode: true``) result plus receipt logs into a
 normalized, JSON-serializable structure that two replays can be compared on.
 
-See ``docs/state-comparison.md`` for the soundness design and the field tolerance
+See ``docs/tx-replay-comparison.md`` for the comparison design and field tolerance
 classes. This module only *captures and canonicalizes*; comparison lives in
 ``state_compare.py``.
 """
@@ -219,7 +219,7 @@ def parse_account_diffs(prestate_diff: Dict[str, Any]) -> Dict[str, AccountDiff]
             # or storage); a pure nonce+code pre-image with no balance and no storage is an
             # accessed account, not a deletion. Treating the latter as a deletion produces
             # spurious nonce 1->0 / code->0x divergences that differ across clients (e.g.
-            # geth-live vs Anvil), so we skip it. (See docs/state-comparison.md.)
+            # geth-live vs Anvil), so we skip it. (See docs/tx-replay-comparison.md.)
             has_real_state = (_to_int(p.get("balance")) or 0) > 0 or bool(
                 p.get("storage")
             )
@@ -348,6 +348,7 @@ def build_capture(
     effective_gas_price: Optional[int] = None,
     sender: Optional[str] = None,
     coinbase: Optional[str] = None,
+    failed_subcalls: Optional[int] = None,
 ) -> StateCapture:
     """Assemble a StateCapture from a prestate diff + receipt fields."""
     accounts = parse_account_diffs(prestate_diff) if prestate_diff else {}
@@ -363,4 +364,5 @@ def build_capture(
         coinbase=_norm_addr(coinbase) if coinbase else None,
         accounts=accounts,
         logs=parse_logs(raw_logs or []),
+        failed_subcalls=failed_subcalls,
     )
