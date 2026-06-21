@@ -154,6 +154,11 @@ class AnvilIndexedReplayer:
             "--host",
             self.host,
             "--auto-impersonate",
+            # FIFO mempool ordering: when we batch same-block priors into a single
+            # mined block, txs must execute in submission (= on-chain index) order,
+            # not Anvil's default fee ordering. Harmless for single-tx blocks.
+            "--order",
+            "fifo",
             "--silent",
         ]
         self._proc = subprocess.Popen(
@@ -372,15 +377,25 @@ class AnvilIndexedReplayer:
         verbose: bool,
     ) -> tuple[str, Web3, Dict[str, Any]]:
         """
-        Replay prior txs then target with automine on, forcing the same block timestamp
-        before each mine so time-dependent checks see the source block time.
+        Replay prior same-block txs in ONE mined block at height N, then patch the
+        bytecode and execute the target in the next block, forcing the source block
+        timestamp before each mine so time-dependent checks see the source block time.
+
+        Why one block for the priors (not one block per tx): per-tx automine drifts
+        block.number (N, N+1, N+2, ...). That silently breaks block.number-dependent
+        same-block actors (MEV bots, oracles) — they take a different branch under the
+        drifted number and leave different state, which the target then reads, causing
+        spurious non-reproduction. Mining all priors into a single block at N keeps
+        block.number faithful. Automine OFF + `--order fifo` (see start()) preserves
+        the on-chain index order within that block.
         """
         source_timestamp = normalize_block_timestamp(
             int(source_block.get("timestamp", 0))
         )
         ctx_flags = self._set_block_context(source_block, strict=strict_context)
-        ctx_flags["replay_strategy"] = "sequential_same_timestamp"
-        ctx_flags["automine_enabled"] = self._set_automine(True)
+        ctx_flags["replay_strategy"] = "same_block_priors_batched"
+        # Automine OFF: we explicitly mine each batch so priors share one block.
+        ctx_flags["automine_enabled"] = self._set_automine(False)
         local = Web3(Web3.HTTPProvider(self.rpc_url))
 
         def _fund_if_needed(from_addr: str) -> None:
@@ -394,18 +409,28 @@ class AnvilIndexedReplayer:
                 [Web3.to_checksum_address(from_addr), hex(10**24)],
             )
 
-        for i, h in enumerate(prior_tx_hashes):
-            if verbose:
-                verbose_log(
-                    f"[*] Anvil replay prior tx {i + 1}/{len(prior_tx_hashes)}: {h}"
-                )
+        if prior_tx_hashes:
             if source_timestamp:
                 self._set_next_timestamp_seconds(source_timestamp)
-            prior = w3_source.eth.get_transaction(h)
-            _fund_if_needed(prior["from"])
-            prior_hash = self._send_tx_like(prior)
-            local.eth.wait_for_transaction_receipt(prior_hash, timeout=120)
+            prior_local_hashes: List[str] = []
+            for i, h in enumerate(prior_tx_hashes):
+                if verbose:
+                    verbose_log(
+                        f"[*] Anvil queue prior tx {i + 1}/{len(prior_tx_hashes)}: {h}"
+                    )
+                prior = w3_source.eth.get_transaction(h)
+                _fund_if_needed(prior["from"])
+                prior_local_hashes.append(self._send_tx_like(prior))
+            # One mine: all priors land in block N, in submission (= index) order.
+            self._mine_blocks(1)
+            for ph in prior_local_hashes:
+                local.eth.wait_for_transaction_receipt(ph, timeout=120)
 
+        # Etch bytecode AFTER priors commit against the contract's real on-chain code
+        # (priors that call the contract must see original code, as they did on-chain),
+        # and BEFORE the target. The target is mined in its own block (N+1 when priors
+        # exist, else N); both original and patched runs follow this identical schedule
+        # so the preservation test compares like-for-like.
         self._set_code(contract_address, bytecode)
 
         if verbose:
@@ -427,6 +452,8 @@ class AnvilIndexedReplayer:
                 + (f" (estimate {gas_estimate})" if gas_estimate else "")
             )
         target_local_hash = self._send_tx_like(tx, gas=replay_gas)
+        # Automine is OFF; mine the target's own block explicitly.
+        self._mine_blocks(1)
         local.eth.wait_for_transaction_receipt(target_local_hash, timeout=120)
 
         ctx_flags["replay_gas_limit"] = replay_gas
@@ -488,9 +515,10 @@ class AnvilIndexedReplayer:
             block_tx_count = len(local_block.get("transactions", []))
             source_tx_index = int(tx.get("transactionIndex", 0))
             mined_tx_index = int(mined.get("transactionIndex", 0))
-            strategy = ctx_flags.get("replay_strategy", "sequential_same_timestamp")
-            if strategy == "sequential_same_timestamp":
-                # State is built by ordered execution; index-in-block is not comparable.
+            strategy = ctx_flags.get("replay_strategy", "same_block_priors_batched")
+            if strategy in ("same_block_priors_batched", "sequential_same_timestamp"):
+                # State is built by ordered execution; the target is mined alone in its
+                # own block, so its index-in-block is not comparable to the on-chain one.
                 same_block_batch_ok = True
             else:
                 same_block_batch_ok = mined_tx_index == source_tx_index
@@ -526,7 +554,7 @@ class AnvilIndexedReplayer:
                 "context_unfaithful": context_unfaithful,
                 "strict_context": strict_context,
                 "replay_strategy": ctx_flags.get(
-                    "replay_strategy", "sequential_same_timestamp"
+                    "replay_strategy", "same_block_priors_batched"
                 ),
                 "basefee_context_applied": bool(
                     ctx_flags.get("basefee_applied", False)
@@ -624,7 +652,7 @@ class AnvilIndexedReplayer:
                     "faithfulness": "context_unfaithful",
                     "prior_tx_count": len(prior_tx_hashes),
                     "strict_context": strict_context,
-                    "replay_strategy": "sequential_same_timestamp",
+                    "replay_strategy": "same_block_priors_batched",
                 },
             )
         finally:
