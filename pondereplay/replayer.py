@@ -21,6 +21,12 @@ from .preflight import (
 from .trace import TraceAnalysis, analyze_transaction_trace
 from .utils import verbose_log
 
+# Anvil failure kinds (see anvil_replay._classify_anvil_failure) that a fresh fork
+# can plausibly clear. receipt_timeout is excluded: in heavy same-block prior blocks
+# it is structural (a prior won't mine into the single batched block), so a retry just
+# reproduces it at full cost.
+_RETRYABLE_FAILURES = frozenset({"fork_error", "rpc_failure"})
+
 
 @dataclass
 class ReplayResult:
@@ -439,6 +445,21 @@ class TransactionReplayer:
         orig_dict = (original_result.state_changes or {}).get("state_capture")
         patch_dict = (patched_result.state_changes or {}).get("state_capture")
         if not orig_dict or not patch_dict:
+            # Distinguish a genuine fast-tier run (no state diff by design) from an
+            # Anvil run that failed before it could capture state (receipt timeout,
+            # fork/transport error). The latter is an infrastructure failure that was
+            # already retried; surface it as such instead of blaming the eth_call tier.
+            for res in (original_result, patched_result):
+                diag = res.diagnostics or {}
+                if diag.get("replay_exception"):
+                    kind = diag.get("failure_kind", "rpc_failure")
+                    return {
+                        "available": False,
+                        "failure": kind,
+                        "replay_attempts": diag.get("replay_attempts"),
+                        "reason": f"anvil replay failed before state capture ({kind}): "
+                        f"{res.error or 'unknown error'}",
+                    }
             return {
                 "available": False,
                 "reason": "no state capture (fast eth_call tier produces no state diff; "
@@ -705,21 +726,45 @@ class TransactionReplayer:
             )
 
         effective_bump = self.bump_gas_for_patch if bump_gas is None else bump_gas
-        with AnvilIndexedReplayer(
-            self.fork_url,
-            anvil_bin=self.anvil_bin,
-            bump_gas_for_patch=effective_bump,
-        ) as anvil:
-            result = anvil.replay_indexed(
-                self.w3,
-                tx,
-                receipt,
-                contract_address,
-                new_bytecode,
-                prior,
-                strict_context=strict_context,
-                verbose=verbose,
-            )
+        # Anvil failures here (receipt timeout, fork/transport error) are infrastructure
+        # flakiness, not faithful reverts; replay_indexed tags them with replay_exception.
+        # A fresh Anvil on a clean fork usually clears them, so retry. Tunable via
+        # PONDEREPLAY_ANVIL_RETRIES (additional attempts beyond the first; default 2).
+        max_retries = int(os.environ.get("PONDEREPLAY_ANVIL_RETRIES", "2"))
+        result: Optional[ReplayResult] = None
+        attempt = 0
+        for attempt in range(max_retries + 1):
+            with AnvilIndexedReplayer(
+                self.fork_url,
+                anvil_bin=self.anvil_bin,
+                bump_gas_for_patch=effective_bump,
+            ) as anvil:
+                result = anvil.replay_indexed(
+                    self.w3,
+                    tx,
+                    receipt,
+                    contract_address,
+                    new_bytecode,
+                    prior,
+                    strict_context=strict_context,
+                    verbose=verbose,
+                )
+            diag = result.diagnostics or {}
+            if not diag.get("replay_exception"):
+                break
+            # Only transient classes benefit from a fresh fork. A receipt_timeout is
+            # usually structural here — a same-block prior in a heavy-prior block never
+            # mines into the single batched block — so a fresh fork reproduces it; retry
+            # would only multiply the wait. Fork/transport errors are worth a retry.
+            if diag.get("failure_kind") not in _RETRYABLE_FAILURES:
+                break
+            if attempt < max_retries and verbose:
+                verbose_log(
+                    f"[!] Anvil replay failed ({diag.get('failure_kind', 'rpc_failure')}); "
+                    f"retrying on a fresh fork ({attempt + 1}/{max_retries})..."
+                )
+        if result is not None and result.diagnostics is not None:
+            result.diagnostics["replay_attempts"] = attempt + 1
 
         diag_dict = diagnostics.to_dict()
         diag_dict["faithfulness"] = "faithful"

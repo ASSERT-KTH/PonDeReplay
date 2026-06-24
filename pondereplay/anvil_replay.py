@@ -81,7 +81,14 @@ def _rpc_succeeded(url: str, method: str, params: list) -> bool:
 
 
 def _find_free_port(host: str, start: int, end: int) -> int:
-    """Pick the first free TCP port in [start, end). Raises if none found."""
+    """Pick a free TCP port, preferring the [start, end) window.
+
+    The fixed window keeps parallel workers in disjoint port ranges (see
+    ANVIL_BASE_PORT / ANVIL_PORT_RANGE). When that window is momentarily full —
+    many concurrent forks plus Anvils still in their terminate / TIME_WAIT
+    window — fall back to an OS-assigned ephemeral port from the much larger
+    dynamic range so a transient burst never aborts a replay.
+    """
     for port in range(start, end):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             try:
@@ -89,7 +96,15 @@ def _find_free_port(host: str, start: int, end: int) -> int:
             except OSError:
                 continue
             return port
-    raise RuntimeError(f"No free port available in range [{start}, {end}) on {host}")
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        try:
+            s.bind((host, 0))  # 0 => OS picks any free ephemeral port
+            return s.getsockname()[1]
+        except OSError as exc:
+            raise RuntimeError(
+                f"No free port in range [{start}, {end}) on {host}, and the "
+                f"ephemeral-port fallback also failed: {exc}"
+            ) from exc
 
 
 def normalize_block_timestamp(timestamp: int) -> int:
@@ -102,6 +117,40 @@ def normalize_block_timestamp(timestamp: int) -> int:
     if ts > 1_000_000_000_000:
         return ts // 1000
     return ts
+
+
+def _classify_anvil_failure(exc: Exception) -> str:
+    """Bucket an Anvil-replay exception for diagnostics and retry decisions.
+
+    These are infrastructure failures — the replay never produced a usable receipt
+    — and are categorically different from a faithful on-chain revert (which still
+    mines and captures state). All buckets are transient, so all are retried on a
+    fresh fork; the label only sharpens the reported reason. ``rpc_failure`` is the
+    umbrella default.
+    """
+    msg = str(exc).lower()
+    if "not in the chain" in msg or "timeexhausted" in msg or "time exhausted" in msg:
+        return "receipt_timeout"
+    if (
+        "fork error" in msg
+        or "transport" in msg
+        or "head block does not match" in msg
+        or "fork_block" in msg
+    ):
+        return "fork_error"
+    return "rpc_failure"
+
+
+def _call_tree_touches(node: Any, target_lower: str) -> bool:
+    """True if ``target_lower`` appears as a callee anywhere in a callTracer tree."""
+    if not isinstance(node, dict):
+        return False
+    if (node.get("to") or "").lower() == target_lower:
+        return True
+    for sub in node.get("calls") or []:
+        if _call_tree_touches(sub, target_lower):
+            return True
+    return False
 
 
 class AnvilIndexedReplayer:
@@ -117,9 +166,18 @@ class AnvilIndexedReplayer:
         bump_gas_for_patch: bool = False,
         auto_port: bool = True,
         port_range: int = 100,
+        receipt_timeout: Optional[float] = None,
     ):
         self.fork_url = fork_url
         self.anvil_bin = anvil_bin
+        # Seconds to wait for a mined tx's receipt. A full priors block plus a slow
+        # fork RPC can exceed the old hard-coded 120s; raise via ANVIL_RECEIPT_TIMEOUT
+        # (or the constructor) so the wait is a tunable, not a silent failure point.
+        self.receipt_timeout = float(
+            receipt_timeout
+            if receipt_timeout is not None
+            else os.environ.get("ANVIL_RECEIPT_TIMEOUT", 120)
+        )
         # ANVIL_BASE_PORT / ANVIL_PORT_RANGE let parallel worker processes claim
         # disjoint port windows so concurrent replays never auto-allocate onto each
         # other's Anvil (which surfaces as "head block does not match fork_block").
@@ -130,6 +188,13 @@ class AnvilIndexedReplayer:
         self.port_range = int(os.environ.get("ANVIL_PORT_RANGE", port_range))
         self.rpc_url = f"http://{host}:{self.port}"
         self._proc: Optional[subprocess.Popen] = None
+        # Pre-London (legacy) source blocks have no baseFeePerGas, and some of their
+        # txs were mined on-chain at a sub-1-gwei (often zero) gasPrice that miners
+        # accepted directly. Anvil enforces a base-fee/min-gas-price floor on the blocks
+        # it mines, so those priors are admitted but silently never mined -> the receipt
+        # wait times out and state capture is lost. Set by replay_indexed for legacy
+        # source blocks so start() launches Anvil with a zero fee floor.
+        self.zero_base_fee = False
 
     def __enter__(self) -> "AnvilIndexedReplayer":
         return self
@@ -142,6 +207,26 @@ class AnvilIndexedReplayer:
             raise FileNotFoundError(
                 f"{self.anvil_bin} not found on PATH; install Foundry (foundryup)"
             )
+        # A launch can fail transiently: the port we picked gets grabbed before
+        # Anvil binds it (TOCTOU), or a fork-RPC hiccup trips _wait_for_rpc / the
+        # head-block check. These clear within seconds as sibling Anvils exit, so
+        # retry with backoff instead of failing the whole tx. Tunable via
+        # ANVIL_START_ATTEMPTS.
+        attempts = max(1, int(os.environ.get("ANVIL_START_ATTEMPTS", 6)))
+        last_exc: Optional[BaseException] = None
+        for attempt in range(attempts):
+            try:
+                self._launch_once(fork_block)
+                return
+            except (RuntimeError, OSError, TimeoutError) as exc:
+                last_exc = exc
+                self.stop()
+                if attempt < attempts - 1:
+                    time.sleep(min(3.0, 0.5 * (2 ** attempt)))
+        assert last_exc is not None
+        raise last_exc
+
+    def _launch_once(self, fork_block: int) -> None:
         if self.auto_port:
             self.port = _find_free_port(
                 self.host, self.port, self.port + self.port_range
@@ -165,6 +250,19 @@ class AnvilIndexedReplayer:
             "fifo",
             "--silent",
         ]
+        # Heavy same-block prior batches (dozens-to-hundreds of txs mined into ONE
+        # block) can exceed Anvil's block gas limit, leaving the overflow queued and
+        # unmined -> the receipt wait times out and state capture is lost. Lifting the
+        # block gas limit lets the whole batch land in one block. Opt-in for now.
+        if os.environ.get("ANVIL_DISABLE_BLOCK_GAS_LIMIT"):
+            cmd.append("--disable-block-gas-limit")
+        gas_limit = os.environ.get("ANVIL_GAS_LIMIT")
+        if gas_limit:
+            cmd += ["--gas-limit", gas_limit]
+        # Legacy/pre-London source block: drop Anvil's fee floor to zero so zero-gasPrice
+        # priors that were mined on-chain also mine here (see self.zero_base_fee).
+        if self.zero_base_fee:
+            cmd += ["--base-fee", "0", "--gas-price", "0"]
         self._proc = subprocess.Popen(
             cmd,
             stdout=subprocess.DEVNULL,
@@ -369,6 +467,62 @@ class AnvilIndexedReplayer:
             params["gasPrice"] = _to_rpc_hex(tx["gasPrice"])
         return params
 
+    def _priors_touch_contract(
+        self, w3_source: Web3, prior_tx_hashes: List[str], contract_address: str
+    ) -> bool:
+        """Whether any same-block prior calls the patched contract (direct or internal).
+
+        When none do, etching the patched bytecode up-front cannot change any prior, so
+        the target can share the priors' block (faithful block.number). A prior that does
+        not call the contract is indifferent to which code version it carries.
+
+        Prefers an offline touch index when PONDEREPLAY_TOUCH_ARCHIVE points at a
+        where-have-you-been ``archive`` dir: a file exists at
+        ``<archive>/<contract>/<txhash>.json`` iff that tx touched the contract, so the
+        check is an O(1) stat per prior with zero RPC. The index is complete for the
+        contract's scanned range, so absence reliably means "did not touch".
+
+        Falls back to live callTracer traces when no archive is configured. Conservative:
+        any tracing failure, or (fallback only) more priors than
+        ANVIL_SINGLE_BLOCK_MAX_PRIORS (default 64; bounds trace cost), returns True so the
+        safe split scheme is kept.
+        """
+        target = contract_address.lower()
+
+        def _norm(h: Any) -> str:
+            txh = h if isinstance(h, str) else h.hex()
+            return txh if txh.startswith("0x") else "0x" + txh
+
+        # --- offline touch index (preferred: zero RPC) ---
+        archive = os.environ.get("PONDEREPLAY_TOUCH_ARCHIVE")
+        if archive:
+            cdir = os.path.join(archive, target)
+            if os.path.isdir(cdir):
+                for h in prior_tx_hashes:
+                    if os.path.isfile(os.path.join(cdir, _norm(h).lower() + ".json")):
+                        return True
+                return False
+
+        # --- live-trace fallback ---
+        max_priors = int(os.environ.get("ANVIL_SINGLE_BLOCK_MAX_PRIORS", 64))
+        if len(prior_tx_hashes) > max_priors:
+            return True
+        for h in prior_tx_hashes:
+            # hexbytes>=1.0 .hex() drops the 0x prefix, but raw debug_traceTransaction
+            # requires it (unlike web3's eth.get_transaction, which normalizes).
+            txh = _norm(h)
+            try:
+                resp = w3_source.provider.make_request(
+                    "debug_traceTransaction",
+                    [txh, {"tracer": "callTracer", "timeout": "30s"}],
+                )
+            except Exception:
+                return True
+            trace = resp.get("result") if isinstance(resp, dict) else None
+            if trace is None or _call_tree_touches(trace, target):
+                return True
+        return False
+
     def _replay_sequential_same_timestamp(
         self,
         w3_source: Web3,
@@ -413,10 +567,24 @@ class AnvilIndexedReplayer:
                 [Web3.to_checksum_address(from_addr), hex(10**24)],
             )
 
-        if prior_tx_hashes:
-            if source_timestamp:
-                self._set_next_timestamp_seconds(source_timestamp)
-            prior_local_hashes: List[str] = []
+        # ---- Block-scheme decision ----
+        # Default (split): mine priors into block N against the contract's original code,
+        # etch the patched code, then mine the target ALONE into block N+1. That lets
+        # priors and target see different code, but costs the target its true block.number
+        # (N+1, not N) — which breaks block.number-gated same-block actors (e.g. sniper
+        # routers: "Not a target block"). When NO prior calls the patched contract,
+        # etching the patched code up-front cannot change any prior, so we mine priors AND
+        # the target together in block N and keep block.number faithful.
+        single_block = bool(prior_tx_hashes) and not self._priors_touch_contract(
+            w3_source, prior_tx_hashes, contract_address
+        )
+        ctx_flags["single_block_replay"] = single_block
+        ctx_flags["target_block_offset"] = (
+            1 if (prior_tx_hashes and not single_block) else 0
+        )
+
+        def _queue_priors() -> List[str]:
+            hashes: List[str] = []
             for i, h in enumerate(prior_tx_hashes):
                 if verbose:
                     verbose_log(
@@ -424,56 +592,88 @@ class AnvilIndexedReplayer:
                     )
                 prior = w3_source.eth.get_transaction(h)
                 _fund_if_needed(prior["from"])
-                prior_local_hashes.append(self._send_tx_like(prior))
-            # One mine: all priors land in block N, in submission (= index) order.
-            self._mine_blocks(1)
-            for ph in prior_local_hashes:
-                local.eth.wait_for_transaction_receipt(ph, timeout=120)
+                hashes.append(self._send_tx_like(prior))
+            return hashes
 
-        # Etch bytecode AFTER priors commit against the contract's real on-chain code
-        # (priors that call the contract must see original code, as they did on-chain),
-        # and BEFORE the target. The target is mined in its own block (N+1 when priors
-        # exist, else N); both original and patched runs follow this identical schedule
-        # so the preservation test compares like-for-like.
-        self._set_code(contract_address, bytecode)
-
-        if verbose:
-            verbose_log("[*] Anvil executing target transaction...")
-
-        if source_timestamp:
-            self._set_next_timestamp_seconds(source_timestamp)
-        # Re-pin the base fee for the target's own block. _set_block_context only
-        # set it for the priors' block N; once those priors are mined into N, Anvil
-        # recomputes N+1's base fee from N's gas usage (EIP-1559, up to +12.5%). A
-        # full priors block can push it above the target's maxFeePerGas, so the node
-        # rejects the target at admission (-32003 "max fee per gas less than block
-        # base fee"). On-chain the target executed in block N at the source base fee,
-        # so re-pinning is both the fix and the faithful choice.
-        if strict_context:
-            base_fee = source_block.get("baseFeePerGas")
-            if base_fee is not None:
-                ctx_flags["target_basefee_repinned"] = _rpc_succeeded(
-                    self.rpc_url,
-                    "anvil_setNextBlockBaseFeePerGas",
-                    [_to_rpc_hex(base_fee)],
+        def _target_gas() -> tuple[int, Optional[int], bool]:
+            _fund_if_needed(tx["from"])
+            if self.bump_gas_for_patch:
+                rg, ge, gb = self._replay_gas_limit(local, tx, bytecode_override=True)
+            else:
+                rg, ge, gb = int(tx.get("gas") or 0), None, False
+            if gb and verbose:
+                verbose_log(
+                    f"[*] Patched bytecode replay: gas {tx.get('gas')} -> {rg}"
+                    + (f" (estimate {ge})" if ge else "")
                 )
-        _fund_if_needed(tx["from"])
-        if self.bump_gas_for_patch:
-            replay_gas, gas_estimate, gas_bumped = self._replay_gas_limit(
-                local, tx, bytecode_override=True
+            return rg, ge, gb
+
+        prior_local_hashes: List[str] = []
+        if single_block:
+            # No prior calls the contract, so etching up-front is harmless. Queue the
+            # priors and the target into ONE block (N) -> the target keeps its true
+            # block.number. Base fee for block N was already pinned by _set_block_context,
+            # so no N+1 re-pin is needed.
+            self._set_code(contract_address, bytecode)
+            if source_timestamp:
+                self._set_next_timestamp_seconds(source_timestamp)
+            prior_local_hashes = _queue_priors()
+            if verbose:
+                verbose_log("[*] Anvil executing target transaction...")
+            replay_gas, gas_estimate, gas_bumped = _target_gas()
+            target_local_hash = self._send_tx_like(tx, gas=replay_gas)
+            self._mine_blocks(1)  # priors + target share block N
+            for ph in prior_local_hashes:
+                local.eth.wait_for_transaction_receipt(
+                    ph, timeout=self.receipt_timeout
+                )
+            local.eth.wait_for_transaction_receipt(
+                target_local_hash, timeout=self.receipt_timeout
             )
         else:
-            replay_gas = int(tx.get("gas") or 0)
-            gas_estimate, gas_bumped = None, False
-        if gas_bumped and verbose:
-            verbose_log(
-                f"[*] Patched bytecode replay: gas {tx.get('gas')} -> {replay_gas}"
-                + (f" (estimate {gas_estimate})" if gas_estimate else "")
+            if prior_tx_hashes:
+                if source_timestamp:
+                    self._set_next_timestamp_seconds(source_timestamp)
+                prior_local_hashes = _queue_priors()
+                # One mine: all priors land in block N, in submission (= index) order.
+                self._mine_blocks(1)
+                for ph in prior_local_hashes:
+                    local.eth.wait_for_transaction_receipt(
+                        ph, timeout=self.receipt_timeout
+                    )
+
+            # Etch bytecode AFTER priors commit against the contract's real on-chain code
+            # (priors that call the contract must see original code, as they did on-chain),
+            # and BEFORE the target, which is mined alone in block N+1.
+            self._set_code(contract_address, bytecode)
+
+            if verbose:
+                verbose_log("[*] Anvil executing target transaction...")
+
+            if source_timestamp:
+                self._set_next_timestamp_seconds(source_timestamp)
+            # Re-pin the base fee for the target's own block. _set_block_context only
+            # set it for the priors' block N; once those priors are mined into N, Anvil
+            # recomputes N+1's base fee from N's gas usage (EIP-1559, up to +12.5%). A
+            # full priors block can push it above the target's maxFeePerGas, so the node
+            # rejects the target at admission (-32003 "max fee per gas less than block
+            # base fee"). On-chain the target executed in block N at the source base fee,
+            # so re-pinning is both the fix and the faithful choice.
+            if strict_context:
+                base_fee = source_block.get("baseFeePerGas")
+                if base_fee is not None:
+                    ctx_flags["target_basefee_repinned"] = _rpc_succeeded(
+                        self.rpc_url,
+                        "anvil_setNextBlockBaseFeePerGas",
+                        [_to_rpc_hex(base_fee)],
+                    )
+            replay_gas, gas_estimate, gas_bumped = _target_gas()
+            target_local_hash = self._send_tx_like(tx, gas=replay_gas)
+            # Automine is OFF; mine the target's own block explicitly.
+            self._mine_blocks(1)
+            local.eth.wait_for_transaction_receipt(
+                target_local_hash, timeout=self.receipt_timeout
             )
-        target_local_hash = self._send_tx_like(tx, gas=replay_gas)
-        # Automine is OFF; mine the target's own block explicitly.
-        self._mine_blocks(1)
-        local.eth.wait_for_transaction_receipt(target_local_hash, timeout=120)
 
         ctx_flags["replay_gas_limit"] = replay_gas
         ctx_flags["source_gas_limit"] = int(tx.get("gas") or 0)
@@ -505,6 +705,9 @@ class AnvilIndexedReplayer:
             int(source_block.get("timestamp", 0))
         )
 
+        # Legacy (pre-London) blocks carry no baseFeePerGas; launch Anvil with a zero
+        # fee floor so their (often zero-gasPrice) priors can be mined.
+        self.zero_base_fee = source_block.get("baseFeePerGas") is None
         self.start(fork_block=block_number - 1)
         try:
             timestamp_source = "source_block"
@@ -575,6 +778,8 @@ class AnvilIndexedReplayer:
                 "replay_strategy": ctx_flags.get(
                     "replay_strategy", "same_block_priors_batched"
                 ),
+                "single_block_replay": ctx_flags.get("single_block_replay"),
+                "target_block_offset": ctx_flags.get("target_block_offset"),
                 "basefee_context_applied": bool(
                     ctx_flags.get("basefee_applied", False)
                 ),
@@ -672,6 +877,11 @@ class AnvilIndexedReplayer:
                     "prior_tx_count": len(prior_tx_hashes),
                     "strict_context": strict_context,
                     "replay_strategy": "same_block_priors_batched",
+                    # Mark this as an infrastructure failure (not a faithful revert) so
+                    # the caller can retry on a fresh fork and the state comparison can
+                    # report it distinctly instead of as a missing-capture eth_call run.
+                    "replay_exception": True,
+                    "failure_kind": _classify_anvil_failure(e),
                 },
             )
         finally:
