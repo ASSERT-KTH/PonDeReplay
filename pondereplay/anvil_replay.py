@@ -4,6 +4,7 @@ Anvil-backed indexed replay: fork at block-1, replay prior same-block txs, then 
 
 from __future__ import annotations
 
+import os
 import shutil
 import socket
 import subprocess
@@ -119,12 +120,15 @@ class AnvilIndexedReplayer:
     ):
         self.fork_url = fork_url
         self.anvil_bin = anvil_bin
-        self.port = port
+        # ANVIL_BASE_PORT / ANVIL_PORT_RANGE let parallel worker processes claim
+        # disjoint port windows so concurrent replays never auto-allocate onto each
+        # other's Anvil (which surfaces as "head block does not match fork_block").
+        self.port = int(os.environ.get("ANVIL_BASE_PORT", port))
         self.host = host
         self.bump_gas_for_patch = bump_gas_for_patch
         self.auto_port = auto_port
-        self.port_range = port_range
-        self.rpc_url = f"http://{host}:{port}"
+        self.port_range = int(os.environ.get("ANVIL_PORT_RANGE", port_range))
+        self.rpc_url = f"http://{host}:{self.port}"
         self._proc: Optional[subprocess.Popen] = None
 
     def __enter__(self) -> "AnvilIndexedReplayer":
@@ -438,6 +442,21 @@ class AnvilIndexedReplayer:
 
         if source_timestamp:
             self._set_next_timestamp_seconds(source_timestamp)
+        # Re-pin the base fee for the target's own block. _set_block_context only
+        # set it for the priors' block N; once those priors are mined into N, Anvil
+        # recomputes N+1's base fee from N's gas usage (EIP-1559, up to +12.5%). A
+        # full priors block can push it above the target's maxFeePerGas, so the node
+        # rejects the target at admission (-32003 "max fee per gas less than block
+        # base fee"). On-chain the target executed in block N at the source base fee,
+        # so re-pinning is both the fix and the faithful choice.
+        if strict_context:
+            base_fee = source_block.get("baseFeePerGas")
+            if base_fee is not None:
+                ctx_flags["target_basefee_repinned"] = _rpc_succeeded(
+                    self.rpc_url,
+                    "anvil_setNextBlockBaseFeePerGas",
+                    [_to_rpc_hex(base_fee)],
+                )
         _fund_if_needed(tx["from"])
         if self.bump_gas_for_patch:
             replay_gas, gas_estimate, gas_bumped = self._replay_gas_limit(

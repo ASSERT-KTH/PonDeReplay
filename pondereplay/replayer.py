@@ -4,6 +4,10 @@ Core transaction replay logic using web3.py and local state patching
 
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
+
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -378,6 +382,43 @@ class TransactionReplayer:
             raise RuntimeError(resp["error"])
         return resp.get("result")
 
+    def _live_capture_cached(self, tx_hash: str):
+        """Live (on-chain) StateCapture, cached on disk by tx hash.
+
+        The live capture is built from prestateTracer + callTracer + receipt/block on
+        the upstream RPC — the dominant per-tx cost for prior-heavy cases. The on-chain
+        tx is immutable, so the capture is reusable across runs. Cache is best-effort:
+        any error falls back to a live fetch. Disable with PONDEREPLAY_NO_CACHE;
+        relocate with PONDEREPLAY_CACHE_DIR.
+        """
+        from .state_diff import StateCapture, capture_tx
+
+        cpath = None
+        if not os.environ.get("PONDEREPLAY_NO_CACHE"):
+            try:
+                cid = getattr(self, "_chain_id", None)
+                if cid is None:
+                    cid = int(self.w3.eth.chain_id)
+                    self._chain_id = cid
+                base = os.environ.get("PONDEREPLAY_CACHE_DIR") or os.path.join(
+                    os.path.expanduser("~"), ".cache", "pondereplay"
+                )
+                cache_dir = Path(base) / "live_capture"
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                cpath = cache_dir / f"{cid}_{tx_hash.lower()}.json"
+                if cpath.is_file():
+                    return StateCapture.from_dict(json.loads(cpath.read_text()))
+            except Exception:
+                cpath = None
+
+        cap = capture_tx(self._live_rpc_call, tx_hash)
+        if cpath is not None and cap is not None:
+            try:
+                cpath.write_text(json.dumps(cap.to_dict()))
+            except Exception:
+                pass
+        return cap
+
     def _build_state_comparison(
         self,
         tx_hash: str,
@@ -421,7 +462,7 @@ class TransactionReplayer:
 
         live_cap = None
         try:
-            live_cap = capture_tx(self._live_rpc_call, tx_hash)
+            live_cap = self._live_capture_cached(tx_hash)
         except Exception:
             live_cap = None
 
