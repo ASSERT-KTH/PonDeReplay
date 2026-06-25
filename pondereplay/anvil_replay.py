@@ -13,6 +13,7 @@ from typing import Any, Dict, List, Optional
 
 import requests
 from web3 import Web3
+from web3.exceptions import TransactionNotFound
 
 from .replayer import ReplayResult
 from .revert_decode import apply_revert_to_diagnostics, resolve_revert_details
@@ -58,6 +59,17 @@ def _to_rpc_hex(value: Any) -> str:
     if isinstance(value, str):
         return value if value.startswith("0x") else "0x" + value
     return str(value)
+
+
+def _as_int(value: Any) -> int:
+    """Parse a receipt/block numeric field that may be an int or a hex string."""
+    if value is None:
+        return 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        return int(value, 16) if value.lower().startswith("0x") else int(value)
+    return int(value)
 
 
 def _rpc_try(url: str, method: str, params: list) -> Any:
@@ -129,6 +141,8 @@ def _classify_anvil_failure(exc: Exception) -> str:
     umbrella default.
     """
     msg = str(exc).lower()
+    if "evicted by the block gas limit" in msg or "was not mined" in msg:
+        return "block_gas_limit_eviction"
     if "not in the chain" in msg or "timeexhausted" in msg or "time exhausted" in msg:
         return "receipt_timeout"
     if (
@@ -195,6 +209,12 @@ class AnvilIndexedReplayer:
         # wait times out and state capture is lost. Set by replay_indexed for legacy
         # source blocks so start() launches Anvil with a zero fee floor.
         self.zero_base_fee = False
+        # When we batch same-block priors into ONE block with the target, the priors'
+        # cumulative gas plus the (gas-bumped) target's gas LIMIT can exceed the 30M
+        # block gas limit, so the node admits the target but evicts it from the block ->
+        # the receipt wait times out. Set by replay_indexed whenever priors are present
+        # so start() launches Anvil with the block gas limit lifted.
+        self.batch_priors = False
 
     def __enter__(self) -> "AnvilIndexedReplayer":
         return self
@@ -252,9 +272,11 @@ class AnvilIndexedReplayer:
         ]
         # Heavy same-block prior batches (dozens-to-hundreds of txs mined into ONE
         # block) can exceed Anvil's block gas limit, leaving the overflow queued and
-        # unmined -> the receipt wait times out and state capture is lost. Lifting the
-        # block gas limit lets the whole batch land in one block. Opt-in for now.
-        if os.environ.get("ANVIL_DISABLE_BLOCK_GAS_LIMIT"):
+        # unmined -> the receipt wait times out and state capture is lost. Whenever we
+        # batch priors with the target we lift the block gas limit so the whole batch
+        # lands in one block. Decided in code from the replay shape (set in
+        # replay_indexed), not via an env toggle.
+        if self.batch_priors:
             cmd.append("--disable-block-gas-limit")
         gas_limit = os.environ.get("ANVIL_GAS_LIMIT")
         if gas_limit:
@@ -353,6 +375,36 @@ class AnvilIndexedReplayer:
         if count == 1 and _rpc_succeeded(self.rpc_url, "evm_mine", []):
             return True
         return False
+
+    def _await_mined(
+        self, local: Web3, tx_hash: str, *, label: str, hint: str = ""
+    ) -> dict:
+        """Wait for a receipt, failing fast instead of blocking the full timeout.
+
+        We mine explicitly (evm_mine is synchronous), so an included tx has a receipt
+        the moment the mine returns; a tx the node silently evicted (e.g. it didn't fit
+        the block gas limit) will NEVER appear no matter how long we wait. The old
+        blind ``wait_for_transaction_receipt(timeout=120)`` therefore burned the full
+        receipt_timeout on an eviction. Poll a short grace window, then raise a
+        descriptive error so the real cause is legible in seconds, not minutes.
+        """
+        grace = min(5.0, self.receipt_timeout)
+        deadline = time.time() + grace
+        while True:
+            try:
+                return dict(local.eth.get_transaction_receipt(tx_hash))
+            except TransactionNotFound:
+                if time.time() >= deadline:
+                    break
+                time.sleep(0.2)
+        reason = f"{label} {tx_hash} was not mined within {grace:.0f}s of an explicit mine"
+        if hint:
+            reason += f" ({hint})"
+        reason += (
+            " — likely evicted by the block gas limit; batched replays lift it "
+            "automatically (self.batch_priors -> --disable-block-gas-limit)"
+        )
+        raise RuntimeError(reason)
 
     def _set_block_context(
         self, source_block: dict, strict: bool = False
@@ -527,6 +579,7 @@ class AnvilIndexedReplayer:
         self,
         w3_source: Web3,
         tx: dict,
+        receipt: dict,
         prior_tx_hashes: List[str],
         contract_address: str,
         bytecode: str,
@@ -556,6 +609,15 @@ class AnvilIndexedReplayer:
         ctx_flags["automine_enabled"] = self._set_automine(False)
         local = Web3(Web3.HTTPProvider(self.rpc_url))
 
+        # Gas the priors consumed ahead of the target on-chain (the target's
+        # cumulativeGasUsed counts itself, so subtract its own use). Diagnostic only:
+        # surfaced in the fail-fast eviction message so a future overflow is legible.
+        # NOT used to clamp the patch gas-bump — the patched bytecode needs that
+        # headroom, and _launch_once lifts the block gas limit when batching priors.
+        prior_reserved_gas = max(
+            0, _as_int(receipt.get("cumulativeGasUsed")) - _as_int(receipt.get("gasUsed"))
+        )
+
         def _fund_if_needed(from_addr: str) -> None:
             # 1e24 wei (1,000,000 ETH): enough headroom for value + gas*price on
             # high-value txs. Applied identically to both original/patched runs, so it
@@ -568,17 +630,27 @@ class AnvilIndexedReplayer:
             )
 
         # ---- Block-scheme decision ----
-        # Default (split): mine priors into block N against the contract's original code,
-        # etch the patched code, then mine the target ALONE into block N+1. That lets
-        # priors and target see different code, but costs the target its true block.number
-        # (N+1, not N) — which breaks block.number-gated same-block actors (e.g. sniper
-        # routers: "Not a target block"). When NO prior calls the patched contract,
-        # etching the patched code up-front cannot change any prior, so we mine priors AND
-        # the target together in block N and keep block.number faithful.
-        single_block = bool(prior_tx_hashes) and not self._priors_touch_contract(
-            w3_source, prior_tx_hashes, contract_address
+        # Default: run the target in block N together with the priors (faithful
+        # block.number). Etching the patched code up-front only changes a prior if the
+        # patch alters that prior's behaviour — a case the downstream analyzer catches as
+        # a prior divergence between the O and P runs (then re-runs it on the split
+        # scheme). The one hard exception is a SAME-BLOCK CREATION of the contract: the
+        # creation prior would redeploy the original code over the etched patch, so the
+        # target would silently run unpatched. There we must keep the split (priors -> N,
+        # etch, target -> N+1). Detected by the contract having no code at the fork (N-1).
+        # Opt back into the conservative per-prior touch-check via ANVIL_CONDITIONAL_SINGLE_BLOCK.
+        contract_code_at_fork = local.eth.get_code(
+            Web3.to_checksum_address(contract_address)
         )
+        same_block_creation = bool(prior_tx_hashes) and len(contract_code_at_fork) == 0
+        if os.environ.get("ANVIL_CONDITIONAL_SINGLE_BLOCK"):
+            single_block = bool(prior_tx_hashes) and not same_block_creation and (
+                not self._priors_touch_contract(w3_source, prior_tx_hashes, contract_address)
+            )
+        else:
+            single_block = bool(prior_tx_hashes) and not same_block_creation
         ctx_flags["single_block_replay"] = single_block
+        ctx_flags["same_block_creation"] = same_block_creation
         ctx_flags["target_block_offset"] = (
             1 if (prior_tx_hashes and not single_block) else 0
         )
@@ -598,6 +670,11 @@ class AnvilIndexedReplayer:
         def _target_gas() -> tuple[int, Optional[int], bool]:
             _fund_if_needed(tx["from"])
             if self.bump_gas_for_patch:
+                # Do NOT clamp the bump to the block's remaining gas: the patched
+                # bytecode genuinely needs the extra headroom, and starving it would
+                # OOG -> a spurious revert that looks like the patch blocking the
+                # attack. _launch_once lifts the block gas limit when batching priors
+                # (self.batch_priors), so the bumped target fits regardless.
                 rg, ge, gb = self._replay_gas_limit(local, tx, bytecode_override=True)
             else:
                 rg, ge, gb = int(tx.get("gas") or 0), None, False
@@ -624,11 +701,15 @@ class AnvilIndexedReplayer:
             target_local_hash = self._send_tx_like(tx, gas=replay_gas)
             self._mine_blocks(1)  # priors + target share block N
             for ph in prior_local_hashes:
-                local.eth.wait_for_transaction_receipt(
-                    ph, timeout=self.receipt_timeout
-                )
-            local.eth.wait_for_transaction_receipt(
-                target_local_hash, timeout=self.receipt_timeout
+                self._await_mined(local, ph, label="prior tx")
+            self._await_mined(
+                local,
+                target_local_hash,
+                label="target tx",
+                hint=(
+                    f"priors used {prior_reserved_gas} gas + target gas limit "
+                    f"{replay_gas} in one block"
+                ),
             )
         else:
             if prior_tx_hashes:
@@ -638,9 +719,7 @@ class AnvilIndexedReplayer:
                 # One mine: all priors land in block N, in submission (= index) order.
                 self._mine_blocks(1)
                 for ph in prior_local_hashes:
-                    local.eth.wait_for_transaction_receipt(
-                        ph, timeout=self.receipt_timeout
-                    )
+                    self._await_mined(local, ph, label="prior tx")
 
             # Etch bytecode AFTER priors commit against the contract's real on-chain code
             # (priors that call the contract must see original code, as they did on-chain),
@@ -671,8 +750,11 @@ class AnvilIndexedReplayer:
             target_local_hash = self._send_tx_like(tx, gas=replay_gas)
             # Automine is OFF; mine the target's own block explicitly.
             self._mine_blocks(1)
-            local.eth.wait_for_transaction_receipt(
-                target_local_hash, timeout=self.receipt_timeout
+            self._await_mined(
+                local,
+                target_local_hash,
+                label="target tx",
+                hint=f"target gas limit {replay_gas} alone in its block",
             )
 
         ctx_flags["replay_gas_limit"] = replay_gas
@@ -708,6 +790,9 @@ class AnvilIndexedReplayer:
         # Legacy (pre-London) blocks carry no baseFeePerGas; launch Anvil with a zero
         # fee floor so their (often zero-gasPrice) priors can be mined.
         self.zero_base_fee = source_block.get("baseFeePerGas") is None
+        # Batching priors with the target into one block can overflow the block gas
+        # limit; lift it at launch (see _launch_once) when priors are present.
+        self.batch_priors = bool(prior_tx_hashes)
         self.start(fork_block=block_number - 1)
         try:
             timestamp_source = "source_block"
@@ -715,6 +800,7 @@ class AnvilIndexedReplayer:
                 self._replay_sequential_same_timestamp(
                     w3_source,
                     tx,
+                    receipt,
                     prior_tx_hashes,
                     contract_address,
                     bytecode,
