@@ -655,7 +655,70 @@ class AnvilIndexedReplayer:
             1 if (prior_tx_hashes and not single_block) else 0
         )
 
-        def _queue_priors() -> List[str]:
+        bumped_priors: List[int] = []
+
+        def _prior_gas_for_patch(prior: dict, h: Any) -> Optional[int]:
+            """Δ-bump a same-block prior so the patch's extra gas can't OOG it.
+
+            In the single-block scheme priors execute against the etched PATCHED code
+            but, unlike the target, are sent with their original gas limit. A prior whose
+            on-chain headroom is smaller than the patch's added overhead (e.g. a guard's
+            extra SLOAD/SSTOREs) would OOG and revert -- silently corrupting the target's
+            inherited pre-state and producing a spurious needs_inspection on an innocent,
+            delta-exact target. Give it exactly the extra gas the patched code path needs
+            (estimate_patched - original_used). This preserves the prior's real on-chain
+            headroom, so a prior that was going to OOG on its own merits still does, and
+            never reduces a limit (delta <= 0 -> no change). Returns None to leave gas as-is.
+
+            Cheap touch test only (direct caller, or offline touch-index hit): live
+            per-prior tracing is too slow for heavy prior batches, so internal-only
+            touchers are left to the split scheme.
+            """
+            to = (prior.get("to") or "").lower()
+            touches = to == contract_address.lower()
+            if not touches:
+                archive = os.environ.get("PONDEREPLAY_TOUCH_ARCHIVE")
+                if archive:
+                    txh = h if isinstance(h, str) else h.hex()
+                    txh = (txh if txh.startswith("0x") else "0x" + txh).lower()
+                    touches = os.path.isfile(
+                        os.path.join(archive, contract_address.lower(), txh + ".json")
+                    )
+            if not touches:
+                return None
+            original_limit = int(prior.get("gas") or 0)
+            if original_limit <= 0:
+                return None
+            try:
+                original_used = int(
+                    w3_source.eth.get_transaction_receipt(prior["hash"])["gasUsed"]
+                )
+                patched_est = int(
+                    local.eth.estimate_gas(
+                        {
+                            "from": Web3.to_checksum_address(prior["from"]),
+                            "to": (
+                                Web3.to_checksum_address(prior["to"])
+                                if prior.get("to") is not None
+                                else None
+                            ),
+                            "value": prior.get("value", 0),
+                            "data": prior.get("input") or b"",
+                        }
+                    )
+                )
+            except Exception:
+                # State-ordering or admission quirks: fail safe, leave the prior's gas
+                # untouched rather than guess.
+                return None
+            delta = patched_est - original_used
+            if delta <= 0:
+                return None
+            block = local.eth.get_block("latest")
+            cap = max(int(block.get("gasLimit", 30_000_000)) - 50_000, original_limit)
+            return min(original_limit + delta, cap)
+
+        def _queue_priors(bump_for_patch: bool = False) -> List[str]:
             hashes: List[str] = []
             for i, h in enumerate(prior_tx_hashes):
                 if verbose:
@@ -664,7 +727,15 @@ class AnvilIndexedReplayer:
                     )
                 prior = w3_source.eth.get_transaction(h)
                 _fund_if_needed(prior["from"])
-                hashes.append(self._send_tx_like(prior))
+                gas = _prior_gas_for_patch(prior, h) if bump_for_patch else None
+                if gas is not None:
+                    bumped_priors.append(i)
+                    if verbose:
+                        verbose_log(
+                            f"[*] Prior {i} gas Δ-bumped {prior.get('gas')} -> {gas} "
+                            "(covers patch overhead)"
+                        )
+                hashes.append(self._send_tx_like(prior, gas=gas))
             return hashes
 
         def _target_gas() -> tuple[int, Optional[int], bool]:
@@ -694,7 +765,9 @@ class AnvilIndexedReplayer:
             self._set_code(contract_address, bytecode)
             if source_timestamp:
                 self._set_next_timestamp_seconds(source_timestamp)
-            prior_local_hashes = _queue_priors()
+            # Priors run against the just-etched PATCHED code here, so Δ-bump any whose
+            # on-chain headroom can't absorb the patch overhead (only on the patched run).
+            prior_local_hashes = _queue_priors(bump_for_patch=self.bump_gas_for_patch)
             if verbose:
                 verbose_log("[*] Anvil executing target transaction...")
             replay_gas, gas_estimate, gas_bumped = _target_gas()
@@ -760,6 +833,7 @@ class AnvilIndexedReplayer:
         ctx_flags["replay_gas_limit"] = replay_gas
         ctx_flags["source_gas_limit"] = int(tx.get("gas") or 0)
         ctx_flags["gas_bumped_for_patch"] = gas_bumped
+        ctx_flags["priors_gas_bumped"] = len(bumped_priors)
         if gas_estimate is not None:
             ctx_flags["gas_estimate"] = gas_estimate
 
@@ -881,6 +955,7 @@ class AnvilIndexedReplayer:
                 "replay_gas_limit": ctx_flags.get("replay_gas_limit"),
                 "gas_bumped_for_patch": ctx_flags.get("gas_bumped_for_patch"),
                 "gas_estimate": ctx_flags.get("gas_estimate"),
+                "priors_gas_bumped": ctx_flags.get("priors_gas_bumped"),
             }
 
             if local_status != onchain_status:
