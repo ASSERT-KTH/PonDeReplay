@@ -143,6 +143,11 @@ class StateCapture:
     # more failed subcalls than the original — while top-level status is unchanged —
     # signals an exploit blocked in a sub-call the attacker swallowed.
     failed_subcalls: Optional[int] = None
+    # Full callTracer tree for this execution. Retained (for both the original and
+    # patched runs) so reverts/divergences can be read post-hoc — e.g. an outer GS013 /
+    # Timelock wrapper whose innermost frame carries the real revert reason. Obtained for
+    # free: capture_tx already fetches this trace to count failed_subcalls.
+    call_trace: Optional[Dict[str, Any]] = None
 
     def touched_addresses(self) -> set:
         return set(self.accounts.keys())
@@ -160,6 +165,7 @@ class StateCapture:
                 self.accounts[a].to_dict() for a in sorted(self.accounts.keys())
             ],
             "logs": [log.to_dict() for log in self.logs],
+            "call_trace": self.call_trace,
         }
 
     @classmethod
@@ -186,6 +192,7 @@ class StateCapture:
             accounts=accounts,
             logs=logs,
             failed_subcalls=d.get("failed_subcalls"),
+            call_trace=d.get("call_trace"),
         )
 
 
@@ -311,17 +318,20 @@ def capture_tx(
             rpc_call("eth_getBlockByHash", [block_hash, False]) if block_hash else {}
         )
         failed_subcalls: Optional[int] = None
+        call_trace: Optional[Dict[str, Any]] = None
         try:
             from .trace import count_failed_subcalls
 
-            call_trace = rpc_call(
+            traced = rpc_call(
                 "debug_traceTransaction",
                 [tx_hash, {"tracer": "callTracer", "timeout": "60s"}],
             )
-            if isinstance(call_trace, dict):
-                failed_subcalls = count_failed_subcalls(call_trace)
+            if isinstance(traced, dict):
+                call_trace = traced
+                failed_subcalls = count_failed_subcalls(traced)
         except Exception:
             failed_subcalls = None
+            call_trace = None
         cap = build_capture(
             prestate_diff=diff,
             raw_logs=receipt.get("logs") or [],
@@ -333,6 +343,7 @@ def capture_tx(
             coinbase=(block or {}).get("miner"),
         )
         cap.failed_subcalls = failed_subcalls
+        cap.call_trace = call_trace
         return cap
     except Exception:
         return None

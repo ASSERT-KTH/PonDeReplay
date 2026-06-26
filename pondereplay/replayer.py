@@ -409,7 +409,9 @@ class TransactionReplayer:
                 base = os.environ.get("PONDEREPLAY_CACHE_DIR") or os.path.join(
                     os.path.expanduser("~"), ".cache", "pondereplay"
                 )
-                cache_dir = Path(base) / "live_capture"
+                # v2: entries now include the full call_trace; bump the dir so pre-trace
+                # caches are bypassed (re-fetched once, then re-cached with the trace).
+                cache_dir = Path(base) / "live_capture_v2"
                 cache_dir.mkdir(parents=True, exist_ok=True)
                 cpath = cache_dir / f"{cid}_{tx_hash.lower()}.json"
                 if cpath.is_file():
