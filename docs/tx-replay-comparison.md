@@ -28,13 +28,15 @@ State comparison resolves both cases.
 
 ## 2. Three executions, two comparisons
 
-For each transaction we capture the state effect (via `prestateTracer`, `diffMode: true`)
-for **three** executions, all forking block *N−1*:
+When state comparison is enabled, we capture the state effect (via `prestateTracer`,
+`diffMode: true`) for **three** executions, all forking block *N−1*. Status-only replays
+can use the cheaper tiered `eth_call` / same-block override paths; full state comparison
+requires Anvil state capture.
 
 | Label | Capture key | Meaning |
 |---|---|---|
 | **L** | `live` | the real on-chain transaction (ground truth) |
-| **O** | `original_replay` | unpatched bytecode, replayed locally on Anvil |
+| **O** | `original_replay` | unpatched bytecode, replayed locally in the selected tier |
 | **P** | `patched_replay` | patched bytecode, replayed in the **identical** harness context |
 
 From these we run **two** comparisons. Whether a difference is *critical* or tolerable
@@ -288,7 +290,7 @@ Timestamp affects **how divergences are scored**, not just whether replay runs:
 | Mechanism | Role |
 |---|---|
 | **`context_faithful` flag** | Set from replay diagnostics. When false, value-level mismatches in the preservation test are downgraded to **`context_induced`** — reported separately, not counted as patch-induced behavioral change. |
-| **Context-gated fields** | Storage slots and log fields derived from `block.timestamp` / block number (interest accumulators, TWAP snapshots, freshness timestamps) are critical only when context is faithful. |
+| **Context-gated value fields** | The implementation uses the replay-level `context_faithful` flag: when context is unfaithful, value-level mismatches are reported as `context_induced` instead of critical. It does not try to identify timestamp-derived slots one by one. |
 | **Reproduction check drift** | Cross-context O→L value differences from accrual over the replayed prior-tx sequence are drift regardless of timestamp — they cancel in O→P. |
 | **Gas bump (`--bump-gas-for-patch`, default on)** | Patched bytecode often needs more gas; re-estimation inside Anvil prevents OOG artifacts that would masquerade as timestamp or revert failures. |
 

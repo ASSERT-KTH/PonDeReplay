@@ -72,7 +72,7 @@ The scientific-grade tier (`anvil_replay.py`). It:
 4. aligns `baseFeePerGas` / coinbase best-effort.
 
 Only this tier captures a full **state diff** (via `prestateTracer`, `diffMode: true`), so
-**state comparison requires the Anvil tier** — `--compare-state` forces it.
+**state comparison requires the Anvil tier** — `compare-patch --compare-state` forces it.
 
 ### Preflight & escalation (`preflight.py`)
 Preflight runs before every replay and decides the entry tier and whether to escalate:
@@ -96,10 +96,11 @@ context is faithful.
 
 ## 3. What we capture — the state effect
 
-For O, P, and L we canonicalize each execution into a `StateCapture` (`state_diff.py`) — a
-normalized, JSON-serializable record of everything observable about the tx's effect on
-chain state. Because O/P fork the *same* block, pre-values (`old`) are identical by
-construction and no-op writes are dropped.
+When state comparison is enabled, O, P, and L are canonicalized into `StateCapture`
+(`state_diff.py`) — a normalized, JSON-serializable record of everything observable about
+the tx's effect on chain state. Fast `eth_call` and same-block override replays produce
+status/return data only. Because O/P fork the *same* block in Anvil state-comparison mode,
+pre-values (`old`) are identical by construction and no-op writes are dropped.
 
 | Captured field | What it is | Source |
 |---|---|---|
@@ -218,7 +219,10 @@ The full verdict tables and conditions are in
 
 ---
 
-## 7. End-to-end flow (summary)
+## 7. End-to-end state-comparison flow
+
+This is the `compare-patch --compare-state` path. Without state comparison, O/P still use
+the tiered ladder above, but the state-capture and comparison steps are unavailable.
 
 ```mermaid
 sequenceDiagram
