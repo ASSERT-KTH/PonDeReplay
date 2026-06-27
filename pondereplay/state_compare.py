@@ -21,7 +21,9 @@ from .state_diff import AccountDiff, StateCapture, ZERO_WORD, _norm_word
 # Severity: only ``critical`` flips equivalence. The others are recorded for inspection.
 CRITICAL = "critical"
 CONTEXT_INDUCED = "context_induced"  # would be critical but context is unfaithful
-VALUE_DRIFT = "value_drift"  # value-level diff tolerated in the cross-context reproduction check
+VALUE_DRIFT = (
+    "value_drift"  # value-level diff tolerated in the cross-context reproduction check
+)
 LOOSE = "loose"  # informational only (gas, coinbase, sender nonce, failed subcalls)
 
 DEFAULT_NUMERIC_DRIFT_TOLERANCE = 0.10
@@ -36,7 +38,9 @@ _SIDE_KEYS = {
 
 def _side_key(label: str) -> str:
     """Map internal compare label to report field name (original / live / patch)."""
-    return _SIDE_KEYS.get(label, label.removesuffix("_replay") if label.endswith("_replay") else label)
+    return _SIDE_KEYS.get(
+        label, label.removesuffix("_replay") if label.endswith("_replay") else label
+    )
 
 
 @dataclass
@@ -335,7 +339,9 @@ def compare(
             ):
                 severity = LOOSE
                 err = None
-                note = "patch-only storage: slot introduced by patch, no original analog"
+                note = (
+                    "patch-only storage: slot introduced by patch, no original analog"
+                )
             if err is not None:
                 if max_drift is None or err > max_drift:
                     max_drift = err

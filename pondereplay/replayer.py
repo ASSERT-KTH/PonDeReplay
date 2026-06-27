@@ -518,10 +518,12 @@ class TransactionReplayer:
         repro_subcalls_match = (
             None
             if live_cap is None
-            else original_cap.failed_subcalls == live_cap.failed_subcalls
-            if original_cap.failed_subcalls is not None
-            and live_cap.failed_subcalls is not None
-            else None
+            else (
+                original_cap.failed_subcalls == live_cap.failed_subcalls
+                if original_cap.failed_subcalls is not None
+                and live_cap.failed_subcalls is not None
+                else None
+            )
         )
         test_subcalls_match = (
             original_cap.failed_subcalls == patched_cap.failed_subcalls
@@ -576,7 +578,9 @@ class TransactionReplayer:
                     len(repro_report.value_drift) if repro_report is not None else None
                 ),
                 "max_relative_drift": (
-                    repro_report.max_relative_drift if repro_report is not None else None
+                    repro_report.max_relative_drift
+                    if repro_report is not None
+                    else None
                 ),
                 "loose_count": (
                     len(repro_report.loose) if repro_report is not None else None

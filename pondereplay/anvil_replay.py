@@ -242,7 +242,7 @@ class AnvilIndexedReplayer:
                 last_exc = exc
                 self.stop()
                 if attempt < attempts - 1:
-                    time.sleep(min(3.0, 0.5 * (2 ** attempt)))
+                    time.sleep(min(3.0, 0.5 * (2**attempt)))
         assert last_exc is not None
         raise last_exc
 
@@ -397,7 +397,9 @@ class AnvilIndexedReplayer:
                 if time.time() >= deadline:
                     break
                 time.sleep(0.2)
-        reason = f"{label} {tx_hash} was not mined within {grace:.0f}s of an explicit mine"
+        reason = (
+            f"{label} {tx_hash} was not mined within {grace:.0f}s of an explicit mine"
+        )
         if hint:
             reason += f" ({hint})"
         reason += (
@@ -615,7 +617,8 @@ class AnvilIndexedReplayer:
         # NOT used to clamp the patch gas-bump — the patched bytecode needs that
         # headroom, and _launch_once lifts the block gas limit when batching priors.
         prior_reserved_gas = max(
-            0, _as_int(receipt.get("cumulativeGasUsed")) - _as_int(receipt.get("gasUsed"))
+            0,
+            _as_int(receipt.get("cumulativeGasUsed")) - _as_int(receipt.get("gasUsed")),
         )
 
         def _fund_if_needed(from_addr: str) -> None:
@@ -644,8 +647,14 @@ class AnvilIndexedReplayer:
         )
         same_block_creation = bool(prior_tx_hashes) and len(contract_code_at_fork) == 0
         if os.environ.get("ANVIL_CONDITIONAL_SINGLE_BLOCK"):
-            single_block = bool(prior_tx_hashes) and not same_block_creation and (
-                not self._priors_touch_contract(w3_source, prior_tx_hashes, contract_address)
+            single_block = (
+                bool(prior_tx_hashes)
+                and not same_block_creation
+                and (
+                    not self._priors_touch_contract(
+                        w3_source, prior_tx_hashes, contract_address
+                    )
+                )
             )
         else:
             single_block = bool(prior_tx_hashes) and not same_block_creation

@@ -301,9 +301,7 @@ class TestCompare:
             "pre": {TOKEN: {"storage": {SLOT: _word(5), NEW_SLOT: ZERO_WORD}}},
             "post": {TOKEN: {"storage": {SLOT: _word(9), NEW_SLOT: _word(123)}}},
         }
-        rep = compare(
-            self._cap(orig), self._cap(patch), b_added_storage_loose=True
-        )
+        rep = compare(self._cap(orig), self._cap(patch), b_added_storage_loose=True)
         assert rep.state_equivalent is True
         d = next(d for d in rep.divergences if d.slot == NEW_SLOT)
         assert d.severity == LOOSE
@@ -321,9 +319,7 @@ class TestCompare:
             "pre": {TOKEN: {"storage": {SLOT: _word(5)}}},
             "post": {TOKEN: {"storage": {SLOT: _word(9)}}},
         }
-        rep = compare(
-            self._cap(orig), self._cap(patch), b_added_storage_loose=True
-        )
+        rep = compare(self._cap(orig), self._cap(patch), b_added_storage_loose=True)
         assert rep.state_equivalent is False
 
     def test_original_only_slot_stays_critical(self):
@@ -334,15 +330,19 @@ class TestCompare:
             "post": {TOKEN: {"storage": {SLOT: _word(123)}}},
         }
         patch = {"pre": {}, "post": {}}
-        rep = compare(
-            self._cap(orig), self._cap(patch), b_added_storage_loose=True
-        )
+        rep = compare(self._cap(orig), self._cap(patch), b_added_storage_loose=True)
         assert rep.state_equivalent is False
 
     def _sender_caps(self, post_a, post_b, gas_a, gas_b):
         diffs = (
-            {"pre": {SENDER: {"balance": hex(1000)}}, "post": {SENDER: {"balance": hex(post_a)}}},
-            {"pre": {SENDER: {"balance": hex(1000)}}, "post": {SENDER: {"balance": hex(post_b)}}},
+            {
+                "pre": {SENDER: {"balance": hex(1000)}},
+                "post": {SENDER: {"balance": hex(post_a)}},
+            },
+            {
+                "pre": {SENDER: {"balance": hex(1000)}},
+                "post": {SENDER: {"balance": hex(post_b)}},
+            },
         )
         gas = (gas_a, gas_b)
         return [
@@ -507,12 +507,8 @@ class TestReproductionCheck:
 
     def test_reproduction_check_subcall_mismatch_is_loose(self):
         rep = reproduction_check(
-            build_capture(
-                prestate_diff={}, sender=SENDER, failed_subcalls=0
-            ),
-            build_capture(
-                prestate_diff={}, sender=SENDER, failed_subcalls=1
-            ),
+            build_capture(prestate_diff={}, sender=SENDER, failed_subcalls=0),
+            build_capture(prestate_diff={}, sender=SENDER, failed_subcalls=1),
         )
         assert rep.state_equivalent is True
         sub = [d for d in rep.divergences if d.category == "failed_subcalls"]
@@ -536,15 +532,14 @@ class TestReproductionCheck:
 
     def test_preservation_test_subcall_mismatch_is_loose(self):
         rep = compare(
-            build_capture(
-                prestate_diff={}, sender=SENDER, failed_subcalls=0
-            ),
-            build_capture(
-                prestate_diff={}, sender=SENDER, failed_subcalls=2
-            ),
+            build_capture(prestate_diff={}, sender=SENDER, failed_subcalls=0),
+            build_capture(prestate_diff={}, sender=SENDER, failed_subcalls=2),
         )
         assert rep.state_equivalent is True
-        assert any(d.category == "failed_subcalls" and d.severity == LOOSE for d in rep.divergences)
+        assert any(
+            d.category == "failed_subcalls" and d.severity == LOOSE
+            for d in rep.divergences
+        )
 
     def test_reproduction_check_log_data_only_is_drift(self):
         # Same event identity (address + topics), only the data payload (amount) drifts ->
@@ -587,8 +582,14 @@ class TestReproductionCheck:
 
     def test_reproduction_check_nonsender_balance_small_drift_is_drift(self):
         # A non-sender account whose ETH balance drifts slightly (accrual) -> tolerated.
-        a = {"pre": {TOKEN: {"balance": hex(1000)}}, "post": {TOKEN: {"balance": hex(1100)}}}
-        b = {"pre": {TOKEN: {"balance": hex(1000)}}, "post": {TOKEN: {"balance": hex(1105)}}}
+        a = {
+            "pre": {TOKEN: {"balance": hex(1000)}},
+            "post": {TOKEN: {"balance": hex(1100)}},
+        }
+        b = {
+            "pre": {TOKEN: {"balance": hex(1000)}},
+            "post": {TOKEN: {"balance": hex(1105)}},
+        }
         rep = reproduction_check(self._cap(a), self._cap(b))
         assert rep.state_equivalent is True
         bal = [d for d in rep.divergences if d.category == "balance"]
@@ -596,8 +597,14 @@ class TestReproductionCheck:
 
     def test_reproduction_check_nonsender_balance_large_drift_is_critical(self):
         # A non-sender account moving a wildly different ETH amount -> reproduction failure.
-        a = {"pre": {TOKEN: {"balance": hex(1000)}}, "post": {TOKEN: {"balance": hex(1100)}}}
-        b = {"pre": {TOKEN: {"balance": hex(1000)}}, "post": {TOKEN: {"balance": hex(9000)}}}
+        a = {
+            "pre": {TOKEN: {"balance": hex(1000)}},
+            "post": {TOKEN: {"balance": hex(1100)}},
+        }
+        b = {
+            "pre": {TOKEN: {"balance": hex(1000)}},
+            "post": {TOKEN: {"balance": hex(9000)}},
+        }
         rep = reproduction_check(self._cap(a), self._cap(b))
         assert rep.state_equivalent is False
         assert any(
@@ -607,8 +614,14 @@ class TestReproductionCheck:
     def test_reproduction_check_sender_nongas_balance_stays_drift(self):
         # Sender non-gas balance delta differs (gas-normalization residue across O->L) ->
         # stays value_drift even when large, never fails the reproduction check.
-        a = {"pre": {SENDER: {"balance": hex(1000)}}, "post": {SENDER: {"balance": hex(900)}}}
-        b = {"pre": {SENDER: {"balance": hex(1000)}}, "post": {SENDER: {"balance": hex(1000)}}}
+        a = {
+            "pre": {SENDER: {"balance": hex(1000)}},
+            "post": {SENDER: {"balance": hex(900)}},
+        }
+        b = {
+            "pre": {SENDER: {"balance": hex(1000)}},
+            "post": {SENDER: {"balance": hex(1000)}},
+        }
         rep = reproduction_check(
             build_capture(
                 prestate_diff=a, sender=SENDER, gas_used=0, effective_gas_price=0
@@ -623,8 +636,14 @@ class TestReproductionCheck:
 
     def test_preservation_test_nonsender_balance_small_diff_is_critical(self):
         # In the preservation test even a tiny non-sender balance change is critical.
-        a = {"pre": {TOKEN: {"balance": hex(1000)}}, "post": {TOKEN: {"balance": hex(1100)}}}
-        b = {"pre": {TOKEN: {"balance": hex(1000)}}, "post": {TOKEN: {"balance": hex(1101)}}}
+        a = {
+            "pre": {TOKEN: {"balance": hex(1000)}},
+            "post": {TOKEN: {"balance": hex(1100)}},
+        }
+        b = {
+            "pre": {TOKEN: {"balance": hex(1000)}},
+            "post": {TOKEN: {"balance": hex(1101)}},
+        }
         rep = compare(self._cap(a), self._cap(b))
         assert rep.state_equivalent is False
         assert any(
