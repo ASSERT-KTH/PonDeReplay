@@ -17,7 +17,7 @@ PonDeReplay lets you:
 
 1. Replay with **original** bytecode (`on_original`) — confirm success/revert matches the chain
 2. Replay with **patch** bytecode — attack should revert; benign txs should still succeed
-3. Use **`compare-patch`** for a single attack tx, or **`replay-history`** / the DFHL experiment script for many txs
+3. Use **`compare-patch`** for a single attack tx, or **`replay-history`** for many txs
 
 ## Installation
 
@@ -81,6 +81,41 @@ pondereplay compare-patch \
 
 Expect classification `effective_patch` when the attack reverts under patch but succeeded under original.
 
+### State-effect comparison (behavioral preservation)
+
+Revert/success status alone is incomplete: a benign tx can still *succeed* under the
+patch while changing storage/logs/balances, and an attack can be *blocked in a sub-call*
+the attacker swallows while the top-level tx still returns success. Add `--compare-state`
+to compare the actual on-chain **state effect** of the patched vs. original replay:
+
+```bash
+pondereplay compare-patch \
+  --tx-hash 0xTX --contract-address 0xCONTRACT \
+  --bytecode-file ./patch.hex --original-bytecode-file ./original.hex \
+  --compare-state -v
+```
+
+This forces the Anvil tier (the fast `eth_call` tier produces no state diff), captures a
+`prestateTracer` diff for each replay, and:
+
+- runs the **reproduction check** (O vs live; `reproduces_chain`) — if the original replay
+  does not structurally reproduce the chain tx, the comparison is `inconclusive`;
+- runs the **preservation test** (O vs P; `state_equivalent`) on storage/logs/non-gas
+  balances, with gas-derived state normalized out and time/block-derived state
+  context-gated.
+
+New classification outcomes:
+
+| Outcome | Meaning |
+|---|---|
+| `needs_inspection` | Benign tx: both succeed, but the patch changed the state effect |
+| `effective_patch` (attack, sub-call) | Top-level still succeeds, but the exploit's state effect is gone |
+
+See [docs/architecture.md](docs/architecture.md) for the architectural overview (how
+replays are done, how/what we compare, with diagrams), and
+[docs/tx-replay-comparison.md](docs/tx-replay-comparison.md) for the full comparison
+design — state effects, drift tolerance, verdicts, and `block.timestamp` handling.
+
 ## Commands
 
 | Command | Purpose |
@@ -90,7 +125,7 @@ Expect classification `effective_patch` when the attack reverts under patch but 
 | `sanity-check` | Original bytecode only; compare to chain receipt |
 | `replay-history` | Batch replay from Etherscan or a tx list file |
 | `tx-list` | Export contract tx history from Etherscan to JSON |
-| `batch-replay` | Scan blocks for txs to an address (slow; prefer `tx-list`) |
+| `bytecode` | Fetch current bytecode for a contract |
 | `trace-analyze` | Inspect a transaction trace |
 
 ```bash
@@ -118,8 +153,11 @@ Useful flags:
 | `--strict-anvil` | Force timestamp-aligned Anvil replay |
 | `--bump-gas-for-patch` | Re-estimate gas on Anvil ( **default on** when patch bytecode is provided; use `--no-bump-gas-for-patch` to disable) |
 | `--auto-strict-on-mismatch` | Escalate when fast replay disagrees with chain (default: on) |
+| `--bytecode-hex` | Provide deployed bytecode directly instead of via `--bytecode-file` |
+| `--with-trace` | Run trace-backed preflight analysis (slower; off by default) |
+| `--fork-url` / `ETH_FORK_URL` | Use a separate fork URL when Anvil should not fork from `ETH_RPC_URL` |
 
-See [docs/timestamp-dependence.md](docs/timestamp-dependence.md) for why `block.timestamp` matters and how strict Anvil mitigates it.
+Timestamp-sensitive replays are covered in [docs/tx-replay-comparison.md](docs/tx-replay-comparison.md) §6.
 
 ## History replay
 
@@ -136,38 +174,6 @@ pondereplay replay-history \
 `tx-list-file` accepts one hash per line, or JSON `["0x...", ...]` / `{"tx_hashes": [...]}`.
 
 Without `--bytecode-file`, each tx is replayed with on-chain bytecode at its own \(N-1\).
-
-## DFHL experiment (batch original + patch)
-
-For the [dfhl-invariants](https://github.com/Deffensive/dfhl-invariants) dataset:
-
-```bash
-python scripts/run_dfhl_full_experiment.py \
-  --verbose \
-  --skip-existing
-```
-
-For each case this:
-
-1. Replays all txs from `dfhl-invariants/src/<case>/txs/` on **original** and **patch**
-2. Writes results under `dfhl-invariants/results/pondereplay/<case>/{original,patch}/`
-3. Produces `soundness.json` with per-tx **`on_original`** sanity (does original replay match chain?) and patch verdicts
-
-Options:
-
-```bash
---only 202603_AlkemiEarn 202210_Uerii   # subset of cases
---limit-tx 20                            # cap txs per case
---bump-gas-for-original                  # also bump gas on original variant
---reclassify-only                        # rebuild soundness from saved replays
---strict-anvil                           # force strict Anvil for all replays
-```
-
-AlkemiEarn-specific script and notes: [docs/recap.md](docs/recap.md).
-
-```bash
-./scripts/run_alkemi_experiment.sh
-```
 
 ## Reading output
 
@@ -193,6 +199,7 @@ JSON results include execution outcome fields (independent of replay machinery s
 | `onchain_reverted` | Did the tx revert on chain? |
 | `local_reverted` | Did the local replay revert? |
 | `faithful_to_chain` | Does local status match chain? (replay sanity) |
+| `success` | Backwards-compatible alias for replay faithfulness, not "tx succeeded" |
 | `local_failure_reason` | `out_of_gas`, `patch_guard`, `revert_other` |
 | `diagnostics.faithfulness` | `faithful`, `approximate`, or `unfaithful` |
 

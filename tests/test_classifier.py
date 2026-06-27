@@ -65,3 +65,208 @@ class TestClassifyPatchEffect:
             )
             == "effective_patch"
         )
+
+
+def _state(available=True, equivalent=True, reproduces_chain=True):
+    # ``state_equivalent`` = same-context test (patched vs original); ``reproduces_chain``
+    # = STRUCTURAL reproduction check (status/scope/code). None means unavailable.
+    return {
+        "available": available,
+        "state_equivalent": equivalent,
+        "reproduces_chain": reproduces_chain,
+    }
+
+
+class TestStateAxis:
+    def test_benign_both_success_state_equal_is_preserved(self):
+        o, p = _result(True), _result(True)
+        assert (
+            classify_patch_effect(
+                o, p, is_attack_tx=False, state=_state(equivalent=True)
+            )
+            == "preserved"
+        )
+
+    def test_benign_both_success_state_diverges_needs_inspection(self):
+        o, p = _result(True), _result(True)
+        assert (
+            classify_patch_effect(
+                o, p, is_attack_tx=False, state=_state(equivalent=False)
+            )
+            == "needs_inspection"
+        )
+
+    def test_benign_patch_breaks_tx_needs_inspection(self):
+        # Patch makes a benign tx revert -> changed benign behaviour -> inspect.
+        o, p = _result(True), _result(False)
+        assert (
+            classify_patch_effect(
+                o, p, is_attack_tx=False, state=_state(equivalent=True)
+            )
+            == "needs_inspection"
+        )
+
+    def test_benign_chain_not_reproduced_is_inconclusive(self):
+        # Both succeed, test equivalent, but the structural reproduction check failed ->
+        # the original replay didn't reproduce reality -> inconclusive.
+        o, p = _result(True), _result(True)
+        assert (
+            classify_patch_effect(
+                o,
+                p,
+                is_attack_tx=False,
+                state=_state(equivalent=True, reproduces_chain=False),
+            )
+            == "inconclusive"
+        )
+
+    def test_benign_value_drift_reproduces_chain_is_preserved(self):
+        # Reproduces chain (value drift tolerated) + test equivalent -> preserved.
+        o, p = _result(True), _result(True)
+        assert (
+            classify_patch_effect(
+                o,
+                p,
+                is_attack_tx=False,
+                state=_state(equivalent=True, reproduces_chain=True),
+            )
+            == "preserved"
+        )
+
+    def test_benign_no_state_falls_back_to_status_only(self):
+        o, p = _result(True), _result(True)
+        assert (
+            classify_patch_effect(o, p, is_attack_tx=False, state=None) == "preserved"
+        )
+
+    def test_attack_subcall_blocked_is_effective(self):
+        # Top-level both succeed, but patched state diverges -> exploit effect gone.
+        o, p = _result(True), _result(True)
+        assert (
+            classify_patch_effect(
+                o,
+                p,
+                chain_tx_succeeded=True,
+                is_attack_tx=True,
+                state=_state(equivalent=False),
+            )
+            == "effective_patch"
+        )
+
+    def test_attack_state_equal_stays_ineffective(self):
+        o, p = _result(True), _result(True)
+        assert (
+            classify_patch_effect(
+                o,
+                p,
+                chain_tx_succeeded=True,
+                is_attack_tx=True,
+                state=_state(equivalent=True),
+            )
+            == "ineffective_patch"
+        )
+
+    def test_attack_top_level_revert_still_effective_regardless_of_state(self):
+        o = _result(True, mode="anvil_indexed")
+        p = _result(False, mode="anvil_indexed")
+        assert (
+            classify_patch_effect(
+                o,
+                p,
+                chain_tx_succeeded=True,
+                is_attack_tx=True,
+                state=_state(equivalent=True),
+            )
+            == "effective_patch"
+        )
+
+    def test_attack_unfaithful_original_is_inconclusive(self):
+        # original.success False (status-unfaithful) -> inconclusive.
+        o = _result(False, mode="anvil_indexed")
+        p = _result(False, mode="anvil_indexed")
+        assert (
+            classify_patch_effect(
+                o,
+                p,
+                chain_tx_succeeded=True,
+                is_attack_tx=True,
+                state=_state(equivalent=False),
+            )
+            == "inconclusive"
+        )
+
+    def test_attack_top_level_revert_effective_even_if_chain_not_reproduced(self):
+        # Clean status flip is decided by status alone; reproduction check not consulted.
+        o = _result(True, mode="anvil_indexed")
+        p = _result(False, mode="anvil_indexed")
+        assert (
+            classify_patch_effect(
+                o,
+                p,
+                chain_tx_succeeded=True,
+                is_attack_tx=True,
+                state=_state(equivalent=True, reproduces_chain=False),
+            )
+            == "effective_patch"
+        )
+
+    def test_attack_both_succeed_chain_not_reproduced_is_inconclusive(self):
+        # Both succeed, test equivalent (exploit lands), but reproduction check failed ->
+        # original replay didn't reproduce reality -> inconclusive.
+        o, p = _result(True), _result(True)
+        assert (
+            classify_patch_effect(
+                o,
+                p,
+                chain_tx_succeeded=True,
+                is_attack_tx=True,
+                state=_state(equivalent=True, reproduces_chain=False),
+            )
+            == "inconclusive"
+        )
+
+    def test_benign_state_available_but_reproduction_unverified_is_inconclusive(self):
+        # Anvil captured O and P (state available) but the live capture failed, so the
+        # reproduction check could not run (reproduces_chain=None). We must NOT emit
+        # "preserved" off a reproduction we never validated -> inconclusive.
+        o, p = _result(True), _result(True)
+        assert (
+            classify_patch_effect(
+                o,
+                p,
+                is_attack_tx=False,
+                state=_state(equivalent=True, reproduces_chain=None),
+            )
+            == "inconclusive"
+        )
+
+    def test_attack_state_available_but_reproduction_unverified_is_inconclusive(self):
+        # Same gap on the attack side: both succeed, exploit appears to land, but with no
+        # live capture we cannot claim the exploit "still lands" -> inconclusive, not
+        # ineffective_patch.
+        o, p = _result(True), _result(True)
+        assert (
+            classify_patch_effect(
+                o,
+                p,
+                chain_tx_succeeded=True,
+                is_attack_tx=True,
+                state=_state(equivalent=True, reproduces_chain=None),
+            )
+            == "inconclusive"
+        )
+
+    def test_benign_diverged_with_unverified_reproduction_still_needs_inspection(self):
+        # A same-context state change is attributable to the patch regardless of the
+        # reproduction check, so it stays needs_inspection even when reproduction is
+        # unverified (the reproduction gate only governs the "nothing changed" verdicts).
+        o, p = _result(True), _result(True)
+        assert (
+            classify_patch_effect(
+                o,
+                p,
+                is_attack_tx=False,
+                state=_state(equivalent=False, reproduces_chain=None),
+            )
+            == "needs_inspection"
+        )

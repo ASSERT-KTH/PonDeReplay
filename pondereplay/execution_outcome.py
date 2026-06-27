@@ -98,6 +98,16 @@ def infer_local_failure_reason(diagnostics: Dict[str, Any]) -> Optional[str]:
         return "out_of_gas"
     if diagnostics.get("patch_guard_would_block") or "borrower is solvent" in msg:
         return "patch_guard"
+    # Genuine data-less revert: the resolver actually ran (revert_source set) and the
+    # frame carried no return data / reason string (bare REVERT or require() with no
+    # message). Only claim this when we truly looked — a placeholder "execution
+    # reverted" with no revert_source is NOT confirmed data-less, so it stays generic.
+    if (
+        diagnostics.get("revert_source")
+        and not diagnostics.get("revert_data")
+        and msg in ("", "execution reverted")
+    ):
+        return "revert_no_message"
     return "revert_other"
 
 

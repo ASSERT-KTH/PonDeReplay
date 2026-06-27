@@ -826,6 +826,12 @@ def trace_analyze(
     help="Auto-escalate to strict Anvil when replay result mismatches likely on-chain behavior",
 )
 @click.option(
+    "--compare-state",
+    is_flag=True,
+    help="Compare on-chain state effects (storage/logs/balances), not just revert status. "
+    "Forces the Anvil tier and checks the replay against live chain (see docs/tx-replay-comparison.md)",
+)
+@click.option(
     "--output",
     type=click.Choice(["json", "text"]),
     default="json",
@@ -842,6 +848,7 @@ def compare_patch(
     use_anvil: bool,
     strict_anvil: bool,
     auto_strict_on_mismatch: bool,
+    compare_state: bool,
     output: str,
     verbose: bool,
 ):
@@ -862,6 +869,7 @@ def compare_patch(
             prefer_anvil_when_escalated=use_anvil,
             strict_anvil_context=strict_anvil,
             auto_strict_on_mismatch=auto_strict_on_mismatch,
+            compare_state=compare_state,
         )
         orig_result, patch_result, report = replayer.replay_original_and_patched(
             tx_hash=tx_hash,
@@ -885,6 +893,34 @@ def compare_patch(
             click.echo(f"Patched success: {patch_result.success}")
             if patch_result.error:
                 click.echo(f"Patched error: {patch_result.error}")
+            state = report.get("state_comparison")
+            if state:
+                if not state.get("available"):
+                    click.echo(f"State comparison: unavailable ({state.get('reason')})")
+                else:
+                    effect = {True: "preserved", False: "changed"}.get(
+                        state.get("state_equivalent"), "—"
+                    )
+                    reproduces = {True: "yes", False: "no"}.get(
+                        state.get("reproduces_chain"), "—"
+                    )
+                    live_status = {1: "success", 0: "reverted"}.get(
+                        state.get("live_status"), "—"
+                    )
+                    cr = state.get("chain_reproduction") or {}
+                    click.echo(f"Live tx status (on-chain): {live_status}")
+                    click.echo(f"Patch effect (patched vs original): {effect}")
+                    click.echo(
+                        f"Reproduces chain (replay vs live): {reproduces} "
+                        f"(chain mismatches={cr.get('chain_mismatch_count')}, "
+                        f"tolerated drift={cr.get('tolerated_drift_count')}, "
+                        f"max relative drift={cr.get('max_relative_drift')})"
+                    )
+                    fs = state.get("failed_subcalls") or {}
+                    click.echo(
+                        "Failed subcalls (live/orig/patch): "
+                        f"{fs.get('live')}/{fs.get('original')}/{fs.get('patched')}"
+                    )
         sys.exit(0)
     except Exception as e:
         click.echo(f"❌ Error: {str(e)}", err=True)

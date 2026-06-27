@@ -31,7 +31,7 @@ pytest tests/test_cli.py::TestBytecodeReading::test_read_hex_file
 pytest tests/ --cov=pondereplay --cov-report=html
 ```
 
-### Skip slow/integration tests
+### Skip integration tests
 ```bash
 pytest tests/ -m "not integration"
 ```
@@ -43,48 +43,33 @@ pytest tests/ --run-integration
 
 ## Test Structure
 
-- **test_replayer.py** - Core TransactionReplayer functionality
-  - ReplayResult dataclass tests
-  - TransactionReplayer initialization and connection
-  - Transaction replay logic
-  - Sanity check functionality
-  - Result comparison logic
-
-- **test_cli.py** - CLI command tests
-  - Bytecode reading (hex, JSON, binary formats)
-  - `replay` command
-  - `sanity-check` command
-  - `bytecode` command
-  - Output formatting (JSON and text)
-
-- **test_examples.py** - Project structure validation
-  - Example scripts existence and structure
-  - Package structure
-  - Configuration files
-
-- **test_integration.py** - Integration tests (skipped by default)
-  - Real blockchain interaction tests
-  - Requires `--run-integration` flag
-
-- **conftest.py** - Pytest configuration and shared fixtures
-  - Mock transaction data
-  - Mock receipts
-  - Sample bytecode
+- **test_replayer.py** - Core `TransactionReplayer` behavior, replay results, and sanity checks
+- **test_cli.py** - CLI option handling, bytecode reading, and command output
+- **test_txlist.py** - Explicit transaction-list parsing and validation
+- **test_etherscan.py** - Etherscan history fetching helpers
+- **test_preflight.py** - Preflight diagnostics and escalation decisions
+- **test_anvil_replay.py** / **test_anvil_lifecycle.py** - Anvil replay backend behavior
+- **test_state_compare.py** - State-effect comparison, drift tolerance, and divergence severity
+- **test_classifier.py** / **test_classifier_oog.py** - Patch-effect classification
+- **test_execution_outcome.py** - Execution outcome fields and faithfulness semantics
+- **test_trace.py** - Trace analysis helpers
+- **test_patch_guard.py** - Patch guard diagnostics
+- **test_revert_decode.py** - Revert reason decoding
+- **test_integration.py** - Network/RPC integration tests, skipped unless `--run-integration` is passed
+- **conftest.py** - Pytest options and shared fixtures
 
 ## Test Coverage
 
 Current test coverage includes:
 
-✅ ReplayResult dataclass creation and serialization  
-✅ TransactionReplayer initialization and connection handling  
-✅ Transaction replay with state overrides  
-✅ Sanity check with original bytecode  
-✅ Result comparison logic  
-✅ Bytecode reading from multiple formats (hex, JSON, binary)  
-✅ CLI commands (replay, sanity-check, bytecode)  
-✅ Output formatting (JSON and text)  
-✅ Error handling and edge cases  
-✅ Project structure validation  
+- `ReplayResult` creation and serialization
+- `TransactionReplayer` initialization and connection handling
+- Transaction replay with state overrides and same-block escalation
+- Sanity checks with original bytecode
+- State comparison and patch-effect classification
+- Bytecode reading from hex, JSON artifact, and binary formats
+- CLI commands including `replay`, `sanity-check`, `compare-patch`, `replay-history`, and `bytecode`
+- Output formatting, execution outcome fields, and error handling
 
 ## Writing New Tests
 
@@ -137,17 +122,21 @@ def test_with_mocked_web3(mock_web3):
 Tests run automatically on:
 - Push to main branch
 - Pull requests
-- Manual workflow dispatch
 
-See `.github/workflows/test.yml` for CI configuration.
+CI also runs Black in check mode:
+
+```bash
+black --check pondereplay tests
+pytest tests/
+```
+
+See `.github/workflows/ci.yml` for CI configuration.
 
 ## Markers
 
 - `@pytest.mark.integration` - Integration tests requiring network access
-- `@pytest.mark.slow` - Slow-running tests
 
 Filter tests by marker:
 ```bash
 pytest -m "not integration"  # Skip integration tests
-pytest -m "slow"             # Run only slow tests
 ```

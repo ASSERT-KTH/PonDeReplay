@@ -25,7 +25,7 @@ class TestFreePort:
         assert port != 17646
         assert 17646 < port < 17746
 
-    def test_raises_when_no_free(self):
+    def test_falls_back_when_range_full(self):
         sockets = []
         try:
             base = 17800
@@ -34,8 +34,8 @@ class TestFreePort:
                 s.bind(("127.0.0.1", p))
                 s.listen(1)
                 sockets.append(s)
-            with pytest.raises(RuntimeError, match="No free port"):
-                _find_free_port("127.0.0.1", base, base + 3)
+            port = _find_free_port("127.0.0.1", base, base + 3)
+            assert port < base or port >= base + 3
         finally:
             for s in sockets:
                 s.close()

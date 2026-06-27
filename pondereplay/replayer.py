@@ -4,6 +4,10 @@ Core transaction replay logic using web3.py and local state patching
 
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
+
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -16,6 +20,12 @@ from .preflight import (
 )
 from .trace import TraceAnalysis, analyze_transaction_trace
 from .utils import verbose_log
+
+# Anvil failure kinds (see anvil_replay._classify_anvil_failure) that a fresh fork
+# can plausibly clear. receipt_timeout is excluded: in heavy same-block prior blocks
+# it is structural (a prior won't mine into the single batched block), so a retry just
+# reproduces it at full cost.
+_RETRYABLE_FAILURES = frozenset({"fork_error", "rpc_failure"})
 
 
 @dataclass
@@ -92,6 +102,7 @@ class TransactionReplayer:
         auto_strict_on_mismatch: bool = True,
         anvil_bin: str = "anvil",
         bump_gas_for_patch: bool = False,
+        compare_state: bool = False,
     ):
         self.rpc_url = rpc_url
         self.fork_url = fork_url or rpc_url
@@ -101,6 +112,9 @@ class TransactionReplayer:
         self.auto_strict_on_mismatch = auto_strict_on_mismatch
         self.anvil_bin = anvil_bin
         self.bump_gas_for_patch = bump_gas_for_patch
+        # State-effect comparison needs per-tx state diffs, which only the Anvil tier
+        # produces; enabling it forces the Anvil tier for original/patched runs.
+        self.compare_state = compare_state
         self.w3 = Web3(Web3.HTTPProvider(rpc_url))
 
         if not self.w3.is_connected():
@@ -354,16 +368,231 @@ class TransactionReplayer:
         )
 
         chain_ok = receipt.get("status", 0) == 1
+        state = self._build_state_comparison(tx_hash, original_result, patched_result)
         report = build_classification_report(
             original_result,
             patched_result,
             chain_tx_succeeded=chain_ok,
             is_attack_tx=is_attack_tx,
             include_trace=False,
+            state=state,
         )
         patched_result.patch_classification = report["classification"]
         original_result.patch_classification = report["classification"]
         return original_result, patched_result, report
+
+    def _live_rpc_call(self, method: str, params: list) -> Any:
+        """Adapter so state_diff.capture_tx can query the source RPC via web3."""
+        resp = self.w3.provider.make_request(method, params)
+        if resp.get("error"):
+            raise RuntimeError(resp["error"])
+        return resp.get("result")
+
+    def _live_capture_cached(self, tx_hash: str):
+        """Live (on-chain) StateCapture, cached on disk by tx hash.
+
+        The live capture is built from prestateTracer + callTracer + receipt/block on
+        the upstream RPC — the dominant per-tx cost for prior-heavy cases. The on-chain
+        tx is immutable, so the capture is reusable across runs. Cache is best-effort:
+        any error falls back to a live fetch. Disable with PONDEREPLAY_NO_CACHE;
+        relocate with PONDEREPLAY_CACHE_DIR.
+        """
+        from .state_diff import StateCapture, capture_tx
+
+        cpath = None
+        if not os.environ.get("PONDEREPLAY_NO_CACHE"):
+            try:
+                cid = getattr(self, "_chain_id", None)
+                if cid is None:
+                    cid = int(self.w3.eth.chain_id)
+                    self._chain_id = cid
+                base = os.environ.get("PONDEREPLAY_CACHE_DIR") or os.path.join(
+                    os.path.expanduser("~"), ".cache", "pondereplay"
+                )
+                # v2: entries now include the full call_trace; bump the dir so pre-trace
+                # caches are bypassed (re-fetched once, then re-cached with the trace).
+                cache_dir = Path(base) / "live_capture_v2"
+                cache_dir.mkdir(parents=True, exist_ok=True)
+                cpath = cache_dir / f"{cid}_{tx_hash.lower()}.json"
+                if cpath.is_file():
+                    return StateCapture.from_dict(json.loads(cpath.read_text()))
+            except Exception:
+                cpath = None
+
+        cap = capture_tx(self._live_rpc_call, tx_hash)
+        if cpath is not None and cap is not None:
+            try:
+                cpath.write_text(json.dumps(cap.to_dict()))
+            except Exception:
+                pass
+        return cap
+
+    def _build_state_comparison(
+        self,
+        tx_hash: str,
+        original_result: ReplayResult,
+        patched_result: ReplayResult,
+    ) -> Dict[str, Any]:
+        """
+        Compare the patched replay's state effect against the original replay's, and
+        check the original replay against live chain ("reproduces chain"). See
+        docs/tx-replay-comparison.md.
+
+        Only available when both replays captured state (Anvil tier). The fast eth_call
+        tier produces no state diff, so the comparison is reported as unavailable.
+        """
+        from .state_compare import reproduction_check, preservation_test
+        from .state_diff import StateCapture, capture_tx
+
+        orig_dict = (original_result.state_changes or {}).get("state_capture")
+        patch_dict = (patched_result.state_changes or {}).get("state_capture")
+        if not orig_dict or not patch_dict:
+            # Distinguish a genuine fast-tier run (no state diff by design) from an
+            # Anvil run that failed before it could capture state (receipt timeout,
+            # fork/transport error). The latter is an infrastructure failure that was
+            # already retried; surface it as such instead of blaming the eth_call tier.
+            for res in (original_result, patched_result):
+                diag = res.diagnostics or {}
+                if diag.get("replay_exception"):
+                    kind = diag.get("failure_kind", "rpc_failure")
+                    return {
+                        "available": False,
+                        "failure": kind,
+                        "replay_attempts": diag.get("replay_attempts"),
+                        "reason": f"anvil replay failed before state capture ({kind}): "
+                        f"{res.error or 'unknown error'}",
+                    }
+            return {
+                "available": False,
+                "reason": "no state capture (fast eth_call tier produces no state diff; "
+                "use the Anvil tier for state comparison)",
+            }
+
+        original_cap = StateCapture.from_dict(orig_dict)
+        patched_cap = StateCapture.from_dict(patch_dict)
+
+        def _ctx_faithful(diag: Dict[str, Any]) -> bool:
+            return not (
+                diag.get("context_unfaithful") or diag.get("time_context_mismatch")
+            )
+
+        odiag = original_result.diagnostics or {}
+        pdiag = patched_result.diagnostics or {}
+        # Reproduction check compares original-replay vs live -> original's context fidelity.
+        repro_context_faithful = _ctx_faithful(odiag)
+        # Test compares the two replays -> faithful only if both are.
+        test_context_faithful = _ctx_faithful(odiag) and _ctx_faithful(pdiag)
+
+        live_cap = None
+        try:
+            live_cap = self._live_capture_cached(tx_hash)
+        except Exception:
+            live_cap = None
+
+        # The patched run may need a higher gas limit; when bumped, the sender's
+        # gas-normalized balance residue no longer cancels in the O->P test.
+        gas_bumped = bool(pdiag.get("gas_bumped_for_patch"))
+        test = preservation_test(
+            original_cap,
+            patched_cap,
+            context_faithful=test_context_faithful,
+            gas_confounded=gas_bumped,
+        )
+        repro_report = (
+            reproduction_check(
+                original_cap, live_cap, context_faithful=repro_context_faithful
+            )
+            if live_cap is not None
+            else None
+        )
+
+        # ``state_equivalent`` (test: patched vs original, same fork context) is the
+        # decisive state signal. ``reproduces_chain`` is the calibrated reproduction check
+        # (structural + bounded numeric storage drift) — load-bearing only where the
+        # verdict depends on state (the both-succeed case).
+        failed_subcalls = {
+            "original": original_cap.failed_subcalls,
+            "patched": patched_cap.failed_subcalls,
+            "live": live_cap.failed_subcalls if live_cap is not None else None,
+        }
+        repro_subcalls_match = (
+            None
+            if live_cap is None
+            else (
+                original_cap.failed_subcalls == live_cap.failed_subcalls
+                if original_cap.failed_subcalls is not None
+                and live_cap.failed_subcalls is not None
+                else None
+            )
+        )
+        test_subcalls_match = (
+            original_cap.failed_subcalls == patched_cap.failed_subcalls
+            if original_cap.failed_subcalls is not None
+            and patched_cap.failed_subcalls is not None
+            else None
+        )
+        # When the on-chain tx reverted but the gas-bumped original replay succeeds,
+        # the revert was gas/OOG-induced (more gas → it completes), not a logic revert.
+        # Both runs keep the gas bump (so the patched-vs-original test stays valid); we
+        # flag it so the reproduction "failure" reads as an expected OOG artifact rather
+        # than a behavioral divergence, and so revert-preservation can be read off the
+        # patched status with that caveat in mind.
+        live_status = live_cap.status if live_cap is not None else None
+        orig_gas_bumped = bool(odiag.get("gas_bumped_for_patch"))
+        onchain_revert_gas_induced = bool(
+            live_status == 0 and original_cap.status == 1 and orig_gas_bumped
+        )
+        return {
+            "available": True,
+            "context_faithful": test_context_faithful,
+            "state_equivalent": test.state_equivalent,
+            "status_faithful": bool(original_result.success),
+            # Top-level execution status per run: 1 = success, 0 = reverted, None = unknown.
+            "live_status": live_status,
+            "original_status": original_cap.status,
+            "patched_status": patched_cap.status,
+            # On-chain reverted but the (gas-bumped) replay completes -> revert was
+            # gas/OOG-induced, not behavioral. See note above.
+            "onchain_revert_gas_induced": onchain_revert_gas_induced,
+            "reproduces_chain": (
+                repro_report.state_equivalent if repro_report is not None else None
+            ),
+            "failed_subcalls": failed_subcalls,
+            "failed_subcalls_match": {
+                "reproduction_check": repro_subcalls_match,
+                "preservation_test": test_subcalls_match,
+            },
+            "gas_limit_potentially_confounded": gas_bumped,
+            "test": test.to_dict(),
+            "chain_reproduction": {
+                "kind": "calibrated",
+                "available": repro_report is not None,
+                "context_faithful": repro_context_faithful,
+                "state_equivalent": (
+                    repro_report.state_equivalent if repro_report is not None else None
+                ),
+                "chain_mismatch_count": (
+                    len(repro_report.critical) if repro_report is not None else None
+                ),
+                "tolerated_drift_count": (
+                    len(repro_report.value_drift) if repro_report is not None else None
+                ),
+                "max_relative_drift": (
+                    repro_report.max_relative_drift
+                    if repro_report is not None
+                    else None
+                ),
+                "loose_count": (
+                    len(repro_report.loose) if repro_report is not None else None
+                ),
+                "report": repro_report.to_dict() if repro_report is not None else None,
+            },
+            "captures": {
+                "original": orig_dict,
+                "patched": patch_dict,
+                "live": live_cap.to_dict() if live_cap is not None else None,
+            },
+        }
 
     def _execute_replay(
         self,
@@ -377,8 +606,17 @@ class TransactionReplayer:
         verbose: bool,
         replay_mode_suffix: str,
     ) -> ReplayResult:
-        bump_on_anvil = self.bump_gas_for_patch or replay_mode_suffix == "patched"
-        if self.prefer_anvil_when_escalated and escalate:
+        # In state-comparison mode both runs must be treated identically: give both gas
+        # headroom (else the original can OOG where the patched does not) and always use
+        # the strict, timestamp/base-fee/coinbase-aligned context so the replay reproduces
+        # the on-chain execution faithfully.
+        bump_on_anvil = (
+            self.bump_gas_for_patch
+            or replay_mode_suffix == "patched"
+            or self.compare_state
+        )
+        strict_context = self.strict_anvil_context or self.compare_state
+        if self.compare_state or (self.prefer_anvil_when_escalated and escalate):
             result = self._replay_with_anvil(
                 tx,
                 receipt,
@@ -386,7 +624,7 @@ class TransactionReplayer:
                 bytecode,
                 diagnostics,
                 trace_analysis,
-                strict_context=self.strict_anvil_context,
+                strict_context=strict_context,
                 verbose=verbose,
                 bump_gas=bump_on_anvil,
             )
@@ -494,21 +732,45 @@ class TransactionReplayer:
             )
 
         effective_bump = self.bump_gas_for_patch if bump_gas is None else bump_gas
-        with AnvilIndexedReplayer(
-            self.fork_url,
-            anvil_bin=self.anvil_bin,
-            bump_gas_for_patch=effective_bump,
-        ) as anvil:
-            result = anvil.replay_indexed(
-                self.w3,
-                tx,
-                receipt,
-                contract_address,
-                new_bytecode,
-                prior,
-                strict_context=strict_context,
-                verbose=verbose,
-            )
+        # Anvil failures here (receipt timeout, fork/transport error) are infrastructure
+        # flakiness, not faithful reverts; replay_indexed tags them with replay_exception.
+        # A fresh Anvil on a clean fork usually clears them, so retry. Tunable via
+        # PONDEREPLAY_ANVIL_RETRIES (additional attempts beyond the first; default 2).
+        max_retries = int(os.environ.get("PONDEREPLAY_ANVIL_RETRIES", "2"))
+        result: Optional[ReplayResult] = None
+        attempt = 0
+        for attempt in range(max_retries + 1):
+            with AnvilIndexedReplayer(
+                self.fork_url,
+                anvil_bin=self.anvil_bin,
+                bump_gas_for_patch=effective_bump,
+            ) as anvil:
+                result = anvil.replay_indexed(
+                    self.w3,
+                    tx,
+                    receipt,
+                    contract_address,
+                    new_bytecode,
+                    prior,
+                    strict_context=strict_context,
+                    verbose=verbose,
+                )
+            diag = result.diagnostics or {}
+            if not diag.get("replay_exception"):
+                break
+            # Only transient classes benefit from a fresh fork. A receipt_timeout is
+            # usually structural here — a same-block prior in a heavy-prior block never
+            # mines into the single batched block — so a fresh fork reproduces it; retry
+            # would only multiply the wait. Fork/transport errors are worth a retry.
+            if diag.get("failure_kind") not in _RETRYABLE_FAILURES:
+                break
+            if attempt < max_retries and verbose:
+                verbose_log(
+                    f"[!] Anvil replay failed ({diag.get('failure_kind', 'rpc_failure')}); "
+                    f"retrying on a fresh fork ({attempt + 1}/{max_retries})..."
+                )
+        if result is not None and result.diagnostics is not None:
+            result.diagnostics["replay_attempts"] = attempt + 1
 
         diag_dict = diagnostics.to_dict()
         diag_dict["faithfulness"] = "faithful"
