@@ -367,6 +367,16 @@ class TransactionReplayer:
             replay_mode_suffix="patched",
         )
 
+        inactive = self._patched_inactive_opcodes(patched_bytecode, block_number)
+        if inactive:
+            patched_result.diagnostics["patched_opcodes_not_activated"] = inactive
+            names = ", ".join(f"{o['opcode']} ({o['hardfork']})" for o in inactive)
+            verbose_log(
+                f"⚠️  Patched bytecode uses opcodes not active at block {block_number}: "
+                f"{names}; compile the patch for an older evmVersion",
+                enabled=verbose,
+            )
+
         chain_ok = receipt.get("status", 0) == 1
         state = self._build_state_comparison(tx_hash, original_result, patched_result)
         report = build_classification_report(
@@ -377,9 +387,26 @@ class TransactionReplayer:
             include_trace=False,
             state=state,
         )
+        if inactive:
+            report["patched_opcodes_not_activated"] = inactive
         patched_result.patch_classification = report["classification"]
         original_result.patch_classification = report["classification"]
         return original_result, patched_result, report
+
+    def _patched_inactive_opcodes(
+        self, patched_bytecode: str, block_number: int
+    ) -> List[Dict[str, Any]]:
+        """Opcodes of the patch newer than the block's hardfork (best effort, see ``hardfork``)."""
+        from .hardfork import inactive_opcodes
+
+        try:
+            cid = getattr(self, "_chain_id", None)
+            if cid is None:
+                cid = int(self.w3.eth.chain_id)
+                self._chain_id = cid
+            return inactive_opcodes(patched_bytecode, cid, block_number)
+        except Exception:
+            return []
 
     def _live_rpc_call(self, method: str, params: list) -> Any:
         """Adapter so state_diff.capture_tx can query the source RPC via web3."""

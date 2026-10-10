@@ -96,6 +96,9 @@ def infer_local_failure_reason(diagnostics: Dict[str, Any]) -> Optional[str]:
     msg = (diagnostics.get("revert_message") or "").lower()
     if "out of gas" in msg or diagnostics.get("trace_out_of_gas_on_impl"):
         return "out_of_gas"
+    # revm halt: an opcode newer than the replayed block's hardfork (see ``hardfork``)
+    if "notactivated" in msg.replace(" ", ""):
+        return "opcode_not_activated"
     if diagnostics.get("patch_guard_would_block") or "borrower is solvent" in msg:
         return "patch_guard"
     # Genuine data-less revert: the resolver actually ran (revert_source set) and the
