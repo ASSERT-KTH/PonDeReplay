@@ -200,8 +200,15 @@ JSON results include execution outcome fields (independent of replay machinery s
 | `local_reverted` | Did the local replay revert? |
 | `faithful_to_chain` | Does local status match chain? (replay sanity) |
 | `success` | Backwards-compatible alias for replay faithfulness, not "tx succeeded" |
-| `local_failure_reason` | `out_of_gas`, `patch_guard`, `revert_other` |
+| `local_failure_reason` | `out_of_gas`, `opcode_not_activated`, `patch_guard`, `revert_other` |
 | `diagnostics.faithfulness` | `faithful`, `approximate`, or `unfaithful` |
+
+**Patch built for a newer hardfork:** replay runs under the hardfork of the tx's block, so a patch
+compiled for a recent `evmVersion` (e.g. `SHR` from Constantinople, `PUSH0` from Shanghai) halts
+with `NotActivated` on older blocks. `compare-patch` lists such opcodes in
+`report.patched_opcodes_not_activated` (Ethereum mainnet schedule) and classifies the halt as
+`inconclusive`, never as `needs_inspection` or `effective_patch`. Recompile the patch with an
+`evmVersion` no newer than the oldest replayed block.
 
 **`on_original` (experiment soundness):** per-tx check that original-bytecode replay matches chain before attributing failures to the patch.
 

@@ -893,6 +893,13 @@ def compare_patch(
             click.echo(f"Patched success: {patch_result.success}")
             if patch_result.error:
                 click.echo(f"Patched error: {patch_result.error}")
+            inactive = report.get("patched_opcodes_not_activated")
+            if inactive:
+                names = ", ".join(f"{o['opcode']} ({o['hardfork']})" for o in inactive)
+                click.echo(
+                    f"⚠️  Patched bytecode uses opcodes not active at this block: {names} "
+                    "— compile the patch for an older evmVersion"
+                )
             state = report.get("state_comparison")
             if state:
                 if not state.get("available"):

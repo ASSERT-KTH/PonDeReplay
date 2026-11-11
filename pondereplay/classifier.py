@@ -6,7 +6,23 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
+from .execution_outcome import infer_local_failure_reason
 from .replayer import ReplayResult
+
+
+def _patched_failure_is_artifact(patched_replay: ReplayResult) -> bool:
+    """
+    True if the patched replay failed for a reason that says nothing about the patch logic:
+    out of gas (larger bytecode at the source gas limit), or an opcode newer than the
+    replayed block's hardfork (patch compiled for a recent ``evmVersion``; see ``hardfork``).
+    """
+    diag = patched_replay.diagnostics or {}
+    if diag.get("trace_out_of_gas_on_impl"):
+        return True
+    reason = diag.get("local_failure_reason") or infer_local_failure_reason(
+        {**diag, "revert_message": diag.get("revert_message") or patched_replay.error}
+    )
+    return reason in ("out_of_gas", "opcode_not_activated")
 
 
 def _state_says_diverged(state: Optional[Dict[str, Any]]) -> Optional[bool]:
@@ -107,10 +123,7 @@ def classify_patch_effect(
             and original_replay.success
             and not patched_replay.success
         ):
-            patch_diag = patched_replay.diagnostics or {}
-            if patch_diag.get("local_failure_reason") == "out_of_gas":
-                return "inconclusive"
-            if patch_diag.get("trace_out_of_gas_on_impl"):
+            if _patched_failure_is_artifact(patched_replay):
                 return "inconclusive"
             return "effective_patch"
         if chain_tx_succeeded and original_replay.success and patched_replay.success:
@@ -135,10 +148,7 @@ def classify_patch_effect(
     if not original_replay.success:
         return "inconclusive"  # replay didn't reproduce the benign tx
     if not patched_replay.success:
-        patch_diag = patched_replay.diagnostics or {}
-        if patch_diag.get("local_failure_reason") == "out_of_gas":
-            return "inconclusive"
-        if patch_diag.get("trace_out_of_gas_on_impl"):
+        if _patched_failure_is_artifact(patched_replay):
             return "inconclusive"
         return "needs_inspection"  # patch broke a benign tx (now reverts)
     # Both succeed. A same-context state change is attributable to the patch regardless of
