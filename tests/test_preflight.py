@@ -11,6 +11,8 @@ from pondereplay.preflight import (
     run_preflight,
 )
 
+PATCHED = "0x85A948Fd70B2b415bdA93324581fb5FfF1293DF7"
+
 
 def _mock_w3(
     tx_to_prev: int = 100,
@@ -18,6 +20,7 @@ def _mock_w3(
     patched_prev: int = 200,
     tx_index: int = 0,
     creations=None,
+    patched_at: int = None,
 ):
     w3 = Mock()
     tx = {
@@ -35,7 +38,7 @@ def _mock_w3(
             return b"\x00" * tx_to_at
         if block_identifier == 99:
             return b"\x00" * patched_prev
-        return b"\x00" * patched_prev
+        return b"\x00" * (patched_prev if patched_at is None else patched_at)
 
     w3.eth.get_code.side_effect = get_code
     w3.eth.get_block.return_value = {"transactions": []}
@@ -66,6 +69,30 @@ class TestRunPreflight:
         assert diag.escalate_replay
         assert diag.faithfulness == "unfaithful"
         assert any("no code at block" in w for w in diag.warnings)
+
+    def test_patched_created_by_tx(self):
+        # the patched contract has no code before the tx and no earlier tx creates it
+        w3, tx, receipt = _mock_w3(patched_prev=0, patched_at=300)
+        diag = run_preflight(w3, tx, receipt, PATCHED)
+        assert diag.patched_created_by_tx
+
+    def test_no_code_after_the_tx_is_not_created_by_tx(self):
+        # e.g. an RPC error read as empty code: must not be labelled a deployment
+        w3, tx, receipt = _mock_w3(patched_prev=0, patched_at=0)
+        diag = run_preflight(w3, tx, receipt, PATCHED)
+        assert not diag.patched_created_by_tx
+
+    def test_patched_created_earlier_in_block_is_not_created_by_tx(self):
+        w3, tx, receipt = _mock_w3(
+            patched_prev=0, patched_at=300, tx_index=2, creations=PATCHED
+        )
+        diag = run_preflight(w3, tx, receipt, PATCHED)
+        assert not diag.patched_created_by_tx
+
+    def test_existing_patched_contract_is_not_created_by_tx(self):
+        w3, tx, receipt = _mock_w3()
+        diag = run_preflight(w3, tx, receipt, PATCHED)
+        assert not diag.patched_created_by_tx
 
 
 class TestSameBlockOverrides:

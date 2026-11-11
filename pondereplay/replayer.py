@@ -8,7 +8,7 @@ import json
 import os
 from pathlib import Path
 
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, replace
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from web3 import Web3
@@ -344,6 +344,19 @@ class TransactionReplayer:
 
         escalate = diagnostics.escalate_replay
 
+        if diagnostics.patched_created_by_tx:
+            return self._replay_creation_tx(
+                tx,
+                receipt,
+                contract_address,
+                original_bytecode,
+                diagnostics,
+                trace_analysis,
+                escalate,
+                verbose,
+                is_attack_tx=is_attack_tx,
+            )
+
         original_result = self._execute_replay(
             tx,
             receipt,
@@ -389,6 +402,62 @@ class TransactionReplayer:
         )
         if inactive:
             report["patched_opcodes_not_activated"] = inactive
+        patched_result.patch_classification = report["classification"]
+        original_result.patch_classification = report["classification"]
+        return original_result, patched_result, report
+
+    def _replay_creation_tx(
+        self,
+        tx,
+        receipt,
+        contract_address: str,
+        original_bytecode: str,
+        diagnostics,
+        trace_analysis,
+        escalate: bool,
+        verbose: bool,
+        *,
+        is_attack_tx: bool,
+    ) -> Tuple[ReplayResult, ReplayResult, Dict[str, Any]]:
+        """
+        The tx deploys the patched contract, so there is no runtime code to patch before it
+        runs: installing the patch first only makes the creation fail (``CreateCollision``).
+        Replay the original as a reproduction check and label the pair ``not_applicable``.
+        """
+        from .classifier import build_classification_report
+
+        verbose_log(
+            f"[*] {contract_address} is created by this tx; patch not applicable",
+            enabled=verbose,
+        )
+        original_result = self._execute_replay(
+            tx,
+            receipt,
+            contract_address,
+            original_bytecode,
+            diagnostics,
+            trace_analysis,
+            escalate,
+            verbose,
+            replay_mode_suffix="original",
+        )
+        # No patched run: the patched side mirrors the original so batch pass/fail and
+        # faithfulness reflect the reproduction check, not a replay that cannot exist.
+        patched_result = replace(
+            original_result,
+            replay_mode="patch_not_applicable",
+            diagnostics={
+                **(original_result.diagnostics or {}),
+                "patch_not_applicable": "contract created by this tx",
+            },
+        )
+        report = build_classification_report(
+            original_result,
+            patched_result,
+            chain_tx_succeeded=receipt.get("status", 0) == 1,
+            is_attack_tx=is_attack_tx,
+            state={"available": False, "reason": "contract created by this tx"},
+        )
         patched_result.patch_classification = report["classification"]
         original_result.patch_classification = report["classification"]
         return original_result, patched_result, report

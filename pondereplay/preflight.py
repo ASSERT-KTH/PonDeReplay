@@ -41,6 +41,9 @@ class PreflightDiagnostics:
     warnings: List[str] = field(default_factory=list)
     same_block_creations: List[SameBlockCreation] = field(default_factory=list)
     trace_touched_same_block_contracts: List[str] = field(default_factory=list)
+    # The patched contract does not exist before this tx (this tx deploys it, directly or
+    # via a factory): the patch, which replaces runtime code, cannot be installed first.
+    patched_created_by_tx: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -150,12 +153,19 @@ def run_preflight(
     else:
         faithfulness = "unfaithful"
 
+    patched_created_by_tx = False
     if patched_prev == 0:
         warnings.append(
             f"Patched address {patched_address} has no code at block {prev_block}"
         )
         if not escalate:
             escalate = True
+        # Has code once the tx ran (also guards against an RPC error read as "no code").
+        created_earlier = {c.contract_address.lower() for c in same_block_creations}
+        patched_created_by_tx = (
+            patched_address.lower() not in created_earlier
+            and _code_len(w3, patched_address, block_number) > 0
+        )
 
     try:
         prev_ts = int(w3.eth.get_block(prev_block).get("timestamp", 0))
@@ -192,6 +202,7 @@ def run_preflight(
         warnings=warnings,
         same_block_creations=same_block_creations,
         trace_touched_same_block_contracts=trace_touched,
+        patched_created_by_tx=patched_created_by_tx,
     )
 
 
