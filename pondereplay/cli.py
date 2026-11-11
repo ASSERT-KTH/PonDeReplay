@@ -371,6 +371,15 @@ def replay(
     help="Enable verbose output",
 )
 @click.option(
+    "--compare/--no-compare",
+    default=None,
+    help=(
+        "Also replay the original bytecode as a control and classify each tx "
+        "(preserved, needs_inspection, effective_patch, ...), as compare-patch does. "
+        "Doubles the replays. Defaults to on when patched bytecode is provided."
+    ),
+)
+@click.option(
     "--bump-gas-for-patch/--no-bump-gas-for-patch",
     default=None,
     help=(
@@ -395,6 +404,7 @@ def replay_history(
     attack_tx: Optional[str],
     output: str,
     verbose: bool,
+    compare: Optional[bool],
     bump_gas_for_patch: Optional[bool],
 ):
     """
@@ -441,6 +451,8 @@ def replay_history(
 
         if bump_gas_for_patch is None:
             bump_gas_for_patch = bytecode is not None
+        if compare is None:
+            compare = bytecode is not None
 
         if verbose:
             if bytecode is None:
@@ -493,6 +505,8 @@ def replay_history(
             contract_address=contract_address,
             new_bytecode=bytecode,
             verbose=verbose,
+            compare=compare,
+            attack_tx=attack_tx,
         )
         report = batch.generate_report(results, attack_tx=attack_tx, verbose=verbose)
 
@@ -507,6 +521,8 @@ def replay_history(
                 "unfaithful_replay_txs": report.get("unfaithful_replay_txs", []),
                 "passed_txs": report["passed_txs"],
                 "failed_txs": report["failed_txs"],
+                "classification_counts": report.get("classification_counts", {}),
+                "classifications": report.get("classifications", {}),
             }
             click.echo(json.dumps(output_data, indent=2))
         else:
@@ -1089,6 +1105,15 @@ def sanity_check(
     help="Expected attack transaction hash (0x-prefixed, for reporting)",
 )
 @click.option(
+    "--compare/--no-compare",
+    default=None,
+    help=(
+        "Also replay the original bytecode as a control and classify each tx "
+        "(preserved, needs_inspection, effective_patch, ...), as compare-patch does. "
+        "Doubles the replays. Defaults to on when patched bytecode is provided."
+    ),
+)
+@click.option(
     "--output",
     type=click.Choice(["json", "text"]),
     default="text",
@@ -1111,6 +1136,7 @@ def batch_replay(
     use_anvil: bool,
     strict_anvil: bool,
     auto_strict_on_mismatch: bool,
+    compare: Optional[bool],
     output: str,
     verbose: bool,
 ):
@@ -1139,6 +1165,8 @@ def batch_replay(
             raise click.UsageError(
                 "batch-replay requires patched bytecode via --bytecode-file or --bytecode-hex"
             )
+        if compare is None:
+            compare = True
         if verbose:
             click.echo(f"✓ Bytecode loaded ({len(bytecode) // 2} bytes)", err=True)
 
@@ -1181,6 +1209,8 @@ def batch_replay(
             contract_address=contract_address,
             new_bytecode=bytecode,
             verbose=verbose,
+            compare=compare,
+            attack_tx=attack_tx,
         )
 
         # Generate report
@@ -1195,8 +1225,11 @@ def batch_replay(
                 "attack_tx_failed_as_expected": report.get(
                     "attack_tx_failed_as_expected", False
                 ),
+                "unfaithful_replay_txs": report.get("unfaithful_replay_txs", []),
                 "passed_txs": report["passed_txs"],
                 "failed_txs": report["failed_txs"],
+                "classification_counts": report.get("classification_counts", {}),
+                "classifications": report.get("classifications", {}),
             }
             click.echo(json.dumps(output_data, indent=2))
         else:

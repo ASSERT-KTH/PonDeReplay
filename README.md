@@ -175,6 +175,11 @@ pondereplay replay-history \
 
 Without `--bytecode-file`, each tx is replayed with on-chain bytecode at its own \(N-1\).
 
+With a patch, each tx is also replayed with its original bytecode as a control and gets the same
+patch-effect label as `compare-patch` (`--attack-tx` is classified as the attack). The report adds
+`classification_counts` and per-tx `classifications`. `--no-compare` skips the control replay
+(half the replays, pass/fail only). `batch-replay` behaves the same way.
+
 ## Reading output
 
 JSON results include execution outcome fields (independent of replay machinery success):

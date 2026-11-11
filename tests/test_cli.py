@@ -445,6 +445,8 @@ class TestCLIReplayHistory:
         assert out["passed"] == 1
         assert out["failed"] == 1
         mock_batch.replay_batch.assert_called_once()
+        # a patch was given, so the original-bytecode control replay is on by default
+        assert mock_batch.replay_batch.call_args.kwargs["compare"] is True
 
     def test_replay_history_requires_exactly_one_source(self, tmp_path):
         runner = CliRunner()
