@@ -9,6 +9,14 @@ from typing import Any, Dict, Optional, TYPE_CHECKING
 if TYPE_CHECKING:
     from .replayer import ReplayResult
 
+# ``diagnostics.faithfulness`` values meaning the replay did not reproduce the chain context.
+# ``context_unfaithful`` comes from the Anvil tier (timestamp mismatch or same-block batch failure).
+UNFAITHFUL_VALUES = frozenset({"unfaithful", "context_unfaithful"})
+
+
+def is_unfaithful(diagnostics: Optional[Dict[str, Any]]) -> bool:
+    return (diagnostics or {}).get("faithfulness") in UNFAITHFUL_VALUES
+
 
 def _status_to_reverted(status: Optional[int]) -> Optional[bool]:
     if status is None:
