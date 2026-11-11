@@ -4,6 +4,7 @@ Batch replay operations for multiple transactions
 
 from typing import List, Dict, Any, Optional
 from web3 import Web3
+from .execution_outcome import is_unfaithful
 from .replayer import TransactionReplayer, ReplayResult
 
 
@@ -170,8 +171,7 @@ class BatchReplayer:
         for tx_hash, result in results.items():
             tx_lower = tx_hash.lower()
             is_attack = attack_tx_lower and tx_lower == attack_tx_lower
-            faith = (result.diagnostics or {}).get("faithfulness")
-            if faith == "unfaithful":
+            if is_unfaithful(result.diagnostics):
                 unfaithful.append(tx_hash)
 
             if result.success:

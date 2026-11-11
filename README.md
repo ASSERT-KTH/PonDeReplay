@@ -201,7 +201,7 @@ JSON results include execution outcome fields (independent of replay machinery s
 | `faithful_to_chain` | Does local status match chain? (replay sanity) |
 | `success` | Backwards-compatible alias for replay faithfulness, not "tx succeeded" |
 | `local_failure_reason` | `out_of_gas`, `opcode_not_activated`, `patch_guard`, `revert_other` |
-| `diagnostics.faithfulness` | `faithful`, `approximate`, or `unfaithful` |
+| `diagnostics.faithfulness` | `faithful`, `approximate`, `unfaithful`, or `context_unfaithful` (Anvil tier: timestamp mismatch or same-block batch failure) |
 
 **Patch built for a newer hardfork:** replay runs under the hardfork of the tx's block, so a patch
 compiled for a recent `evmVersion` (e.g. `SHR` from Constantinople, `PUSH0` from Shanghai) halts

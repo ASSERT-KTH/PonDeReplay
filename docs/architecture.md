@@ -79,7 +79,8 @@ Preflight runs before every replay and decides the entry tier and whether to esc
 - detects same-block contract creation / non-zero tx index → `same_block_setup_required`,
   `escalate_replay`;
 - flags `context_mismatch_risk` (advisory `block.timestamp` warning);
-- labels `faithfulness` (faithful / approximate / unfaithful).
+- labels `faithfulness` (faithful / approximate / unfaithful; the Anvil tier adds
+  context_unfaithful).
 
 **Auto-strict escalation:** if a fast replay's local status disagrees with the chain
 receipt, or the error mentions `timestamp` / `deadline` / `time`, the engine automatically
