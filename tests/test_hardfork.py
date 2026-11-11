@@ -45,7 +45,11 @@ def test_push0_inactive_before_shanghai():
 
 
 def test_not_activated_halt_is_a_failure_reason():
-    diag = {"local_status": 0, "revert_message": "NotActivated", "revert_source": "trace"}
+    diag = {
+        "local_status": 0,
+        "revert_message": "NotActivated",
+        "revert_source": "trace",
+    }
     assert infer_local_failure_reason(diag) == "opcode_not_activated"
 
 
@@ -75,7 +79,9 @@ def _pair(patched_error: str):
 
 def test_benign_not_activated_is_inconclusive_not_needs_inspection():
     original, patched = _pair("NotActivated")
-    assert classify_patch_effect(original, patched, is_attack_tx=False) == "inconclusive"
+    assert (
+        classify_patch_effect(original, patched, is_attack_tx=False) == "inconclusive"
+    )
 
 
 def test_attack_not_activated_is_inconclusive_not_effective_patch():
@@ -85,5 +91,18 @@ def test_attack_not_activated_is_inconclusive_not_effective_patch():
 
 def test_genuine_patch_revert_still_counts():
     original, patched = _pair("execution reverted: blocked")
-    assert classify_patch_effect(original, patched, is_attack_tx=False) == "needs_inspection"
-    assert classify_patch_effect(original, patched, is_attack_tx=True) == "effective_patch"
+    assert (
+        classify_patch_effect(original, patched, is_attack_tx=False)
+        == "needs_inspection"
+    )
+    assert (
+        classify_patch_effect(original, patched, is_attack_tx=True) == "effective_patch"
+    )
+
+
+def test_revert_inactive_before_byzantium():
+    # solc >=0.4.10 emits REVERT; pre-Byzantium replays (e.g. 2016 txs) must list it
+    assert inactive_opcodes("0x60006000fd", 1, 1_920_000) == [
+        {"opcode": "REVERT", "hardfork": "byzantium", "activation_block": 4_370_000}
+    ]
+    assert inactive_opcodes("0x60006000fd", 1, 4_370_000) == []

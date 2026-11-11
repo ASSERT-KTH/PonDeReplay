@@ -13,6 +13,11 @@ from typing import Dict, List, Optional, Tuple
 
 # opcode -> (name, hardfork that introduced it)
 NEW_OPCODES: Dict[int, Tuple[str, str]] = {
+    0xF4: ("DELEGATECALL", "homestead"),
+    0x3D: ("RETURNDATASIZE", "byzantium"),
+    0x3E: ("RETURNDATACOPY", "byzantium"),
+    0xFA: ("STATICCALL", "byzantium"),
+    0xFD: ("REVERT", "byzantium"),
     0x1B: ("SHL", "constantinople"),
     0x1C: ("SHR", "constantinople"),
     0x1D: ("SAR", "constantinople"),
@@ -32,6 +37,8 @@ NEW_OPCODES: Dict[int, Tuple[str, str]] = {
 # chain id -> hardfork -> first block (Ethereum mainnet only; other chains are not judged)
 ACTIVATION_BLOCKS: Dict[int, Dict[str, int]] = {
     1: {
+        "homestead": 1_150_000,
+        "byzantium": 4_370_000,
         "constantinople": 7_280_000,
         "istanbul": 9_069_000,
         "london": 12_965_000,
@@ -55,7 +62,9 @@ def strip_metadata(code: bytes) -> bytes:
 def used_opcodes(bytecode: str) -> List[int]:
     """Opcodes present in ``bytecode`` (hex, optional 0x), skipping PUSH immediates and
     solc's metadata trailer."""
-    code = strip_metadata(bytes.fromhex(bytecode[2:] if bytecode.startswith("0x") else bytecode))
+    code = strip_metadata(
+        bytes.fromhex(bytecode[2:] if bytecode.startswith("0x") else bytecode)
+    )
     seen: List[int] = []
     i = 0
     while i < len(code):
