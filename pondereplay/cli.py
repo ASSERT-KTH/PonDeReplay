@@ -371,12 +371,12 @@ def replay(
     help="Enable verbose output",
 )
 @click.option(
-    "--compare/--no-compare",
-    default=None,
+    "--compare",
+    is_flag=True,
     help=(
         "Also replay the original bytecode as a control and classify each tx "
         "(preserved, needs_inspection, effective_patch, ...), as compare-patch does. "
-        "Doubles the replays. Defaults to on when patched bytecode is provided."
+        "Doubles the replays. Requires patched bytecode."
     ),
 )
 @click.option(
@@ -404,7 +404,7 @@ def replay_history(
     attack_tx: Optional[str],
     output: str,
     verbose: bool,
-    compare: Optional[bool],
+    compare: bool,
     bump_gas_for_patch: Optional[bool],
 ):
     """
@@ -451,8 +451,10 @@ def replay_history(
 
         if bump_gas_for_patch is None:
             bump_gas_for_patch = bytecode is not None
-        if compare is None:
-            compare = bytecode is not None
+        if compare and bytecode is None:
+            raise click.UsageError(
+                "--compare requires patched bytecode via --bytecode-file or --bytecode-hex"
+            )
 
         if verbose:
             if bytecode is None:
@@ -1105,12 +1107,12 @@ def sanity_check(
     help="Expected attack transaction hash (0x-prefixed, for reporting)",
 )
 @click.option(
-    "--compare/--no-compare",
-    default=None,
+    "--compare",
+    is_flag=True,
     help=(
         "Also replay the original bytecode as a control and classify each tx "
         "(preserved, needs_inspection, effective_patch, ...), as compare-patch does. "
-        "Doubles the replays. Defaults to on when patched bytecode is provided."
+        "Doubles the replays. Requires patched bytecode."
     ),
 )
 @click.option(
@@ -1136,7 +1138,7 @@ def batch_replay(
     use_anvil: bool,
     strict_anvil: bool,
     auto_strict_on_mismatch: bool,
-    compare: Optional[bool],
+    compare: bool,
     output: str,
     verbose: bool,
 ):
@@ -1165,8 +1167,6 @@ def batch_replay(
             raise click.UsageError(
                 "batch-replay requires patched bytecode via --bytecode-file or --bytecode-hex"
             )
-        if compare is None:
-            compare = True
         if verbose:
             click.echo(f"✓ Bytecode loaded ({len(bytecode) // 2} bytes)", err=True)
 
