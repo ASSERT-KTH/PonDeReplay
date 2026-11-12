@@ -93,7 +93,8 @@ def classify_patch_effect(
     - ``ineffective_patch`` — exploit still lands unchanged
     - ``inconclusive``      — replay didn't reproduce the exploit
 
-    Plus ``unfaithful_replay`` when same-block setup wasn't honoured.
+    Plus ``unfaithful_replay`` when same-block setup wasn't honoured, and
+    ``not_applicable`` when the tx deploys the patched contract (nothing to patch yet).
 
     ``state`` is the optional state-comparison result (see ``state_compare``): the
     same-context test (``state_equivalent``) decides whether the patch changed the state
@@ -105,6 +106,9 @@ def classify_patch_effect(
 
     def _faithful_mode(mode: str) -> bool:
         return "same_block" in mode or mode.startswith("anvil_indexed")
+
+    if (original_replay.diagnostics or {}).get("patched_created_by_tx"):
+        return "not_applicable"
 
     if (original_replay.diagnostics or {}).get("same_block_setup_required"):
         if not _faithful_mode(original_replay.replay_mode) or not _faithful_mode(

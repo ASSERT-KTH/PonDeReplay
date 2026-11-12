@@ -270,3 +270,14 @@ class TestStateAxis:
             )
             == "needs_inspection"
         )
+
+
+def test_deployment_of_patched_contract_is_not_applicable():
+    # the tx deploys the patched contract: no runtime code to patch before it runs
+    for is_attack in (False, True):
+        original = _result(True, mode="anvil_indexed_original")
+        original.diagnostics["patched_created_by_tx"] = True
+        assert (
+            classify_patch_effect(original, original, is_attack_tx=is_attack)
+            == "not_applicable"
+        )

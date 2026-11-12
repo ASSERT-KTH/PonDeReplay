@@ -100,7 +100,9 @@ attack):
 | `ineffective_patch` | exploit still lands unchanged |
 | `inconclusive` | replay did not reproduce the exploit |
 
-Plus `unfaithful_replay` when same-block setup was not honoured by both runs.
+Plus `unfaithful_replay` when same-block setup was not honoured by both runs, and
+`not_applicable` when the tx itself deploys the patched contract: there is no runtime code
+to patch before it runs, so only the original is replayed (as a reproduction check).
 
 ---
 
