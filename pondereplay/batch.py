@@ -2,6 +2,7 @@
 Batch replay operations for multiple transactions
 """
 
+from collections import Counter
 from typing import List, Dict, Any, Optional
 from web3 import Web3
 from .execution_outcome import is_unfaithful
@@ -99,6 +100,9 @@ class BatchReplayer:
         contract_address: str,
         new_bytecode: Optional[str] = None,
         verbose: bool = False,
+        *,
+        compare: bool = False,
+        attack_tx: Optional[str] = None,
     ) -> Dict[str, ReplayResult]:
         """
         Replay multiple transactions with patched bytecode.
@@ -110,9 +114,13 @@ class BatchReplayer:
                 with the contract bytecode as it existed at (block_number - 1)
                 for that transaction.
             verbose: Enable verbose logging
+            compare: Also replay the original bytecode as a control and classify the
+                patch effect per tx (as ``compare-patch``); the label is set on each
+                result's ``patch_classification``. Needs ``new_bytecode``.
+            attack_tx: Attack transaction hash, classified as an attack when comparing
 
         Returns:
-            Dict mapping tx_hash -> ReplayResult
+            Dict mapping tx_hash -> ReplayResult (the patched replay when comparing)
         """
         results = {}
 
@@ -124,12 +132,21 @@ class BatchReplayer:
                 print(f"[{i}/{len(tx_hashes)}] Replaying {tx_hash}...")
 
             try:
-                result = self.replayer.replay_transaction(
-                    tx_hash=tx_hash,
-                    contract_address=contract_address,
-                    new_bytecode=new_bytecode,
-                    verbose=False,
-                )
+                if compare and new_bytecode is not None:
+                    _, result, _ = self.replayer.replay_original_and_patched(
+                        tx_hash=tx_hash,
+                        contract_address=contract_address,
+                        patched_bytecode=new_bytecode,
+                        is_attack_tx=bool(attack_tx)
+                        and tx_hash.lower() == attack_tx.lower(),
+                    )
+                else:
+                    result = self.replayer.replay_transaction(
+                        tx_hash=tx_hash,
+                        contract_address=contract_address,
+                        new_bytecode=new_bytecode,
+                        verbose=False,
+                    )
                 results[tx_hash] = result
             except Exception as e:
                 if verbose:
@@ -167,12 +184,15 @@ class BatchReplayer:
         attack_tx_lower = attack_tx.lower() if attack_tx else None
 
         unfaithful = []
+        classifications: Dict[str, str] = {}
 
         for tx_hash, result in results.items():
             tx_lower = tx_hash.lower()
             is_attack = attack_tx_lower and tx_lower == attack_tx_lower
             if is_unfaithful(result.diagnostics):
                 unfaithful.append(tx_hash)
+            if result.patch_classification:
+                classifications[tx_hash] = result.patch_classification
 
             if result.success:
                 passed.append(tx_hash)
@@ -194,6 +214,10 @@ class BatchReplayer:
             "failed_txs": failed,
             "unfaithful_replay_txs": unfaithful,
             "attack_tx_failed_as_expected": attack_expected_fail,
+            "classification_counts": dict(
+                sorted(Counter(classifications.values()).items())
+            ),
+            "classifications": classifications,
             "results": {k: v.to_dict() for k, v in results.items()},
         }
 
@@ -210,12 +234,42 @@ def print_batch_report(report: Dict[str, Any], attack_tx: str = None):
     print()
 
     if attack_tx:
-        status = (
-            "✓ As Expected"
-            if report["attack_tx_failed_as_expected"]
-            else "✗ Unexpected"
+        label = next(
+            (
+                v
+                for k, v in (report.get("classifications") or {}).items()
+                if k.lower() == attack_tx.lower()
+            ),
+            None,
         )
+        if label:
+            # The comparison also sees a patch that neutralizes the exploit without a revert
+            status = f"{'✓' if label == 'effective_patch' else '✗'} {label}"
+        else:
+            status = (
+                "✓ As Expected"
+                if report["attack_tx_failed_as_expected"]
+                else "✗ Unexpected"
+            )
         print(f"Attack Tx Status: {status}")
+        print()
+
+    counts = report.get("classification_counts")
+    if counts:
+        print("Patch effect (original vs patched replay):")
+        for label, n in counts.items():
+            print(f"  {label}: {n}")
+        flagged = [
+            tx
+            for tx, label in report["classifications"].items()
+            if label != "preserved"
+        ]
+        for tx in flagged[:10]:
+            is_attack = attack_tx and tx.lower() == attack_tx.lower()
+            marker = " [ATTACK]" if is_attack else ""
+            print(f"  {tx}{marker}: {report['classifications'][tx]}")
+        if len(flagged) > 10:
+            print(f"  ... and {len(flagged) - 10} more")
         print()
 
     if report.get("unfaithful_replay_txs"):

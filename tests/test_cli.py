@@ -445,6 +445,8 @@ class TestCLIReplayHistory:
         assert out["passed"] == 1
         assert out["failed"] == 1
         mock_batch.replay_batch.assert_called_once()
+        # the original-bytecode control replay is opt-in (--compare)
+        assert mock_batch.replay_batch.call_args.kwargs["compare"] is False
 
     def test_replay_history_requires_exactly_one_source(self, tmp_path):
         runner = CliRunner()
@@ -522,3 +524,47 @@ class TestCLITxList:
 
         assert res.exit_code != 0
         assert "tx-list requires --etherscan-api-key" in res.output.lower()
+
+
+def _replay_history_args(tmp_path, *extra):
+    txs_file = tmp_path / "txs.txt"
+    txs_file.write_text("0x" + "1" * 64 + "\n")
+    return [
+        "replay-history",
+        "--rpc-url",
+        "http://localhost:8545",
+        "--contract-address",
+        "0xabcd",
+        "--tx-list-file",
+        str(txs_file),
+        *extra,
+    ]
+
+
+@patch("pondereplay.cli.BatchReplayer")
+def test_replay_history_compare_flag_enables_control_replay(mock_batch_class, tmp_path):
+    mock_batch = mock_batch_class.return_value
+    mock_batch.replay_batch.return_value = {}
+    mock_batch.generate_report.return_value = {
+        "total": 0,
+        "passed": 0,
+        "failed": 0,
+        "passed_txs": [],
+        "failed_txs": [],
+    }
+    res = CliRunner().invoke(
+        cli,
+        _replay_history_args(
+            tmp_path, "--bytecode-hex", "0x" + "6" * 10, "--compare", "--output", "json"
+        ),
+    )
+    assert res.exit_code == 0
+    assert mock_batch.replay_batch.call_args.kwargs["compare"] is True
+
+
+@patch("pondereplay.cli.BatchReplayer")
+def test_replay_history_compare_requires_patched_bytecode(mock_batch_class, tmp_path):
+    res = CliRunner().invoke(cli, _replay_history_args(tmp_path, "--compare"))
+    assert res.exit_code != 0
+    assert "--compare requires patched bytecode" in res.output
+    mock_batch_class.return_value.replay_batch.assert_not_called()
